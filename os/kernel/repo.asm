@@ -3,5 +3,5 @@ section .rodata
 align 16
 global repo_blob
 repo_blob:
-    incbin "build/repo.bin"
+    incbin REPO_BIN
 section .note.GNU-stack noalloc noexec nowrite progbits

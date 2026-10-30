@@ -4,7 +4,6 @@
 extern isr_dispatch
 global isr_stub_table
 global gdt_flush
-global idt_load
 
 %macro ISR_NOERR 1
 isr%1:
@@ -93,11 +92,6 @@ gdt_flush:
 .reload:
     ret
 
-; void idt_load(void *idtr)
-idt_load:
-    mov eax, [esp + 4]
-    lidt [eax]
-    ret
 
 section .rodata
 isr_stub_table:

@@ -7,11 +7,14 @@ typedef unsigned short u16;
 typedef unsigned int u32;
 typedef unsigned long long u64;
 typedef signed char i8;
+typedef short i16;
 typedef int i32;
-typedef unsigned int size_t;
+typedef signed long long i64;
+typedef unsigned long size_t;
+typedef unsigned long uptr; /* pointer-sized integer */
 #define NULL ((void *)0)
 
-#define CHAMOWS_VERSION "0.3"
+#define CHAMOWS_VERSION "0.4"
 
 /* ---- ports ---- */
 static inline void outb(u16 p, u8 v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(p)); }
@@ -36,27 +39,25 @@ char *strncpy0(char *d, const char *s, size_t n); /* always NUL-terminates */
 char *utoa(u32 v, char *buf, int base);
 char *itoa(int v, char *buf);
 /* Tiny formatter: %s %d %u %x %c %% and width for d/u (e.g. %02d). */
+#include <stdarg.h>
 int ksnprintf(char *buf, size_t n, const char *fmt, ...);
+int kvsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 
 /* ---- serial.c (COM1 log) ---- */
 void serial_init(void);
 void klog(const char *fmt, ...);
 
 /* ---- mem.c ---- */
-void heap_init(u32 start, u32 end);
+void heap_init(uptr start, uptr end);
 void *kmalloc(size_t n);
 void *kzalloc(size_t n);
 void kfree(void *p);
+void *kmalloc_aligned(size_t n, size_t align); /* zeroed, permanent */
 u32 heap_used(void);
 u32 heap_total(void);
 
 /* ---- cpu.c ---- */
-typedef struct regs {
-    u32 gs, fs, es, ds;
-    u32 edi, esi, ebp, esp, ebx, edx, ecx, eax;
-    u32 int_no, err_code;
-    u32 eip, cs, eflags, useresp, ss;
-} regs_t;
+#include "arch.h" /* regs_t and REG_IP() for this CPU */
 typedef void (*irq_handler_t)(regs_t *);
 void cpu_init(void);
 void irq_install(int irq, irq_handler_t h);
@@ -73,6 +74,7 @@ typedef struct {
     u16 key;      /* key: character (Latin-1) or KEY_* code */
     i32 dx, dy;   /* mouse */
     u8 buttons;   /* mouse: bit0 left, bit1 right, bit2 middle */
+    u8 absolute;  /* mouse: dx, dy are a position, 0..32767 across the screen (USB tablet) */
 } input_event_t;
 enum {
     KEY_ESC = 0x100, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END,
@@ -83,6 +85,10 @@ enum {
 #define KEY_ENTER 10
 void ps2_init(void);
 int input_poll(input_event_t *ev);
+void input_push(const input_event_t *ev);  /* from outside interrupt handlers */
+void kbd_scancode(u8 sc);                   /* feed one PS/2 set-1 byte (USB keyboards use this too) */
+u32 pci_find_class(u8 cls, u8 sub, u8 prog, u8 *bus, u8 *dev, u8 *fn, u32 skip);
+void pci_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v);
 
 /* ---- pci.c ---- */
 u32 pci_read(u8 bus, u8 dev, u8 fn, u8 off);

@@ -12,6 +12,12 @@ static void push(const input_event_t *ev) {
     q_head = next;
 }
 
+void input_push(const input_event_t *ev) {
+    cli();
+    push(ev);
+    sti();
+}
+
 int input_poll(input_event_t *ev) {
     cli();
     if (q_tail == q_head) { sti(); return 0; }
@@ -55,9 +61,7 @@ static void key_event(u16 key, u8 pressed) {
     push(&ev);
 }
 
-static void kbd_irq(regs_t *r) {
-    (void)r;
-    u8 sc = inb(0x60);
+void kbd_scancode(u8 sc) {
     if (sc == 0xE0) { extended = 1; return; }
     u8 released = sc & 0x80;
     sc &= 0x7F;
@@ -133,6 +137,11 @@ static void kbd_irq(regs_t *r) {
     }
     if (ctrl && c >= 'a' && c <= 'z') c = (u16)(c - 'a' + 1) | 0x200; /* Ctrl+letter */
     key_event(c, 1);
+}
+
+static void kbd_irq(regs_t *r) {
+    (void)r;
+    kbd_scancode(inb(0x60));
 }
 
 /* ---- mouse ---- */

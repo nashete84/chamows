@@ -50,9 +50,9 @@ static void draw(cw_window *w) {
     api->text(w, (W - api->text_width(buf, CW_FONT_TITLE)) / 2, 290, buf, 0xFF1A1A1A, CW_FONT_TITLE);
     const char *dn = days[weekday(d, mo, y)];
     char date[64];
-    api->format(date, sizeof date, "%s, %d de ", (int)dn, d, 0);
+    api->format(date, sizeof date, "%s, %d de ", dn, d);
     unsigned l = strlen(date);
-    api->format(date + l, sizeof date - (int)l, "%s de %d", (int)months[mo - 1], y, 0);
+    api->format(date + l, sizeof date - (int)l, "%s de %d", months[mo - 1], y);
     api->text(w, (W - api->text_width(date, CW_FONT_UI)) / 2, 324, date, 0xFF505050, CW_FONT_UI);
 
     /* stopwatch */

@@ -13,7 +13,7 @@
 #ifndef CHAMOWS_SDK_H
 #define CHAMOWS_SDK_H
 
-#define CW_API_VERSION 1
+#define CW_API_VERSION 2
 
 typedef struct cw_window cw_window;
 
@@ -73,15 +73,15 @@ typedef struct cw_api {
     unsigned (*random)(void);
     void (*clock)(int *hour, int *minute, int *second);
     void (*date)(int *day, int *month, int *year);
-    int (*format)(char *buf, int size, const char *fmt, int a, int b, int c); /* %d %s(int as char*) %02d */
+    int (*format)(char *buf, int size, const char *fmt, ...); /* %d %u %x %s %c, widths like %02d */
     void (*log)(const char *msg);
 } cw_api;
 
 int app_main(const cw_api *api);
 
 /* small helpers every app gets from cwlib.c */
-void *memset(void *d, int c, unsigned n);
-void *memcpy(void *d, const void *s, unsigned n);
-unsigned strlen(const char *s);
+void *memset(void *d, int c, unsigned long n);
+void *memcpy(void *d, const void *s, unsigned long n);
+unsigned long strlen(const char *s);
 
 #endif

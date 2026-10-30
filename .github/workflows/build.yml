@@ -10,12 +10,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Instalar herramientas
-        run: sudo apt-get update && sudo apt-get install -y nasm python3-pil fonts-dejavu-core qemu-system-x86
-      - name: Compilar núcleo y apps
-        run: make -C os
-      - name: Arrancar en QEMU hasta el escritorio
+        run: sudo apt-get update && sudo apt-get install -y nasm python3-pil fonts-dejavu-core qemu-system-x86 dosfstools
+      - name: Compilar las dos versiones (64 y 32 bits)
+        run: make -C os both
+      - name: Arrancar la de 64 bits con USB (teclado, tableta y pendrive)
         run: make -C os test
+      - name: Arrancar la de 32 bits (la de la web)
+        run: make -C os test ARCH=i386
+      - name: Comprobar el pendrive de prueba con fsck
+        run: |
+          dd if=os/build/x86_64/pendrive.img of=part.img bs=512 skip=2048 status=none
+          fsck.fat -n part.img
+      - name: Preparar paquete para el Mac
+        run: |
+          mkdir -p chamows-mac
+          cp os/build/x86_64/chamows.bin os/tools/mkfat32.py os/tools/run-chamows.sh chamows-mac/
+          cp os/build/i386/chamows.bin chamows-mac/chamows-32bits.bin
       - uses: actions/upload-artifact@v4
         with:
-          name: chamows-bin
-          path: os/build/chamows.bin
+          name: chamows
+          path: chamows-mac/

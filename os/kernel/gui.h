@@ -85,7 +85,8 @@ int app_uninstall(const char *id); /* closes running windows first */
 int app_run(installed_app_t *a);   /* loads the ELF and calls app_main */
 void app_window_closed(struct app_instance *inst);
 void close_app_windows(struct app_instance *inst); /* gui.c */
-void apps_collect(void);                           /* frees apps whose windows all closed */
+void apps_collect(void);
+void apps_load_from_disk(void);                   /* reinstalls the apps saved on the pendrive */                           /* frees apps whose windows all closed */
 extern struct app_instance *current_app;
 int app_running(const char *id);
 
