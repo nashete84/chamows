@@ -1,5 +1,6 @@
 /* Chamows window system: compositor, desktop, taskbar, Start menu, input. */
 #include "gui.h"
+#include "usb/usb.h"
 #include "assets.h"
 
 const font_t *FONT_UI = &font_ui, *FONT_BOLD = &font_bold, *FONT_TITLE = &font_title, *FONT_MONO = &font_mono;
@@ -726,8 +727,13 @@ static void mouse_up(int button) {
 
 static void handle_mouse(const input_event_t *ev) {
     int ox = mx, oy = my;
-    mx += ev->dx;
-    my += ev->dy;
+    if (ev->absolute) { /* USB tablet: position across the whole screen */
+        mx = ev->dx * SCREEN_W / 32768; /* fits in 32 bits: 32767 * 1024 */
+        my = ev->dy * SCREEN_H / 32768;
+    } else {
+        mx += ev->dx;
+        my += ev->dy;
+    }
     if (mx < 0) mx = 0;
     if (my < 0) my = 0;
     if (mx > SCREEN_W - 1) mx = SCREEN_W - 1;
@@ -807,6 +813,7 @@ void gui_run(void) {
     klog("chamows: escritorio listo\n");
     for (;;) {
         input_event_t ev;
+        usb_poll();
         while (input_poll(&ev)) {
             if (ev.type == EV_MOUSE) handle_mouse(&ev);
             else if (ev.type == EV_KEY) handle_key(&ev);

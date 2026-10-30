@@ -78,3 +78,10 @@ void kfree(void *p) {
 
 u32 heap_used(void) { return used; }
 u32 heap_total(void) { return total; }
+
+/* Memory for devices (USB rings, contexts, buffers): aligned and never freed. */
+void *kmalloc_aligned(size_t n, size_t align) {
+    u8 *p = kzalloc(n + align);
+    if (!p) return NULL;
+    return (void *)(((uptr)p + align - 1) & ~(uptr)(align - 1));
+}

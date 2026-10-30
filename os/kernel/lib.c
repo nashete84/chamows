@@ -159,6 +159,26 @@ u32 pci_read(u8 bus, u8 dev, u8 fn, u8 off) {
     outl(0xCF8, 0x80000000u | ((u32)bus << 16) | ((u32)dev << 11) | ((u32)fn << 8) | (off & 0xFC));
     return inl(0xCFC);
 }
+void pci_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v) {
+    outl(0xCF8, 0x80000000u | ((u32)bus << 16) | ((u32)dev << 11) | ((u32)fn << 8) | (off & 0xFC));
+    outl(0xCFC, v);
+}
+/* Finds the (skip+1)-th device of a class; returns 1 if found. */
+u32 pci_find_class(u8 cls, u8 sub, u8 prog, u8 *bus, u8 *dev, u8 *fn, u32 skip) {
+    for (int b = 0; b < 256; b++)
+        for (int d = 0; d < 32; d++)
+            for (int f = 0; f < 8; f++) {
+                u32 id = pci_read((u8)b, (u8)d, (u8)f, 0);
+                if ((id & 0xFFFF) == 0xFFFF) { if (f == 0) break; continue; }
+                u32 c = pci_read((u8)b, (u8)d, (u8)f, 8);
+                if ((c >> 24) == cls && ((c >> 16) & 0xFF) == sub && ((c >> 8) & 0xFF) == prog) {
+                    if (skip--) continue;
+                    *bus = (u8)b; *dev = (u8)d; *fn = (u8)f;
+                    return 1;
+                }
+            }
+    return 0;
+}
 int pci_find(u16 vendor, u16 device, u8 *bus, u8 *dev, u8 *fn) {
     for (int b = 0; b < 256; b++)
         for (int d = 0; d < 32; d++)

@@ -7,6 +7,7 @@ typedef unsigned short u16;
 typedef unsigned int u32;
 typedef unsigned long long u64;
 typedef signed char i8;
+typedef short i16;
 typedef int i32;
 typedef signed long long i64;
 typedef unsigned long size_t;
@@ -51,6 +52,7 @@ void heap_init(uptr start, uptr end);
 void *kmalloc(size_t n);
 void *kzalloc(size_t n);
 void kfree(void *p);
+void *kmalloc_aligned(size_t n, size_t align); /* zeroed, permanent */
 u32 heap_used(void);
 u32 heap_total(void);
 
@@ -72,6 +74,7 @@ typedef struct {
     u16 key;      /* key: character (Latin-1) or KEY_* code */
     i32 dx, dy;   /* mouse */
     u8 buttons;   /* mouse: bit0 left, bit1 right, bit2 middle */
+    u8 absolute;  /* mouse: dx, dy are a position, 0..32767 across the screen (USB tablet) */
 } input_event_t;
 enum {
     KEY_ESC = 0x100, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END,
@@ -82,6 +85,10 @@ enum {
 #define KEY_ENTER 10
 void ps2_init(void);
 int input_poll(input_event_t *ev);
+void input_push(const input_event_t *ev);  /* from outside interrupt handlers */
+void kbd_scancode(u8 sc);                   /* feed one PS/2 set-1 byte (USB keyboards use this too) */
+u32 pci_find_class(u8 cls, u8 sub, u8 prog, u8 *bus, u8 *dev, u8 *fn, u32 skip);
+void pci_write(u8 bus, u8 dev, u8 fn, u8 off, u32 v);
 
 /* ---- pci.c ---- */
 u32 pci_read(u8 bus, u8 dev, u8 fn, u8 off);
