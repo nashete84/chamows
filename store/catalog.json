@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "apps": [
+    {
+      "id": "chrome",
+      "name": "Google Chrome",
+      "description": "Navegador web de Google.",
+      "category": "Internet",
+      "source": "flatpak",
+      "package": "com.google.Chrome",
+      "icon": "google-chrome"
+    },
+    {
+      "id": "discord",
+      "name": "Discord",
+      "description": "Chat de voz, video y texto.",
+      "category": "Internet",
+      "source": "flatpak",
+      "package": "com.discordapp.Discord",
+      "icon": "discord"
+    },
+    {
+      "id": "telegram",
+      "name": "Telegram",
+      "description": "Mensajería rápida y segura.",
+      "category": "Internet",
+      "source": "flatpak",
+      "package": "org.telegram.desktop",
+      "icon": "telegram"
+    },
+    {
+      "id": "zoom",
+      "name": "Zoom",
+      "description": "Videollamadas y reuniones.",
+      "category": "Internet",
+      "source": "flatpak",
+      "package": "us.zoom.Zoom",
+      "icon": "zoom"
+    },
+    {
+      "id": "libreoffice",
+      "name": "LibreOffice",
+      "description": "Suite ofimática: textos, hojas de cálculo y presentaciones. Abre archivos de Word y Excel.",
+      "category": "Oficina",
+      "source": "apt",
+      "package": "libreoffice",
+      "icon": "libreoffice-startcenter"
+    },
+    {
+      "id": "vlc",
+      "name": "VLC",
+      "description": "Reproduce casi cualquier video o audio.",
+      "category": "Multimedia",
+      "source": "apt",
+      "package": "vlc",
+      "icon": "vlc"
+    },
+    {
+      "id": "gimp",
+      "name": "GIMP",
+      "description": "Editor de imágenes, alternativa a Photoshop.",
+      "category": "Multimedia",
+      "source": "apt",
+      "package": "gimp",
+      "icon": "gimp"
+    },
+    {
+      "id": "spotify",
+      "name": "Spotify",
+      "description": "Música en streaming.",
+      "category": "Multimedia",
+      "source": "flatpak",
+      "package": "com.spotify.Client",
+      "icon": "spotify-client"
+    },
+    {
+      "id": "obs",
+      "name": "OBS Studio",
+      "description": "Grabación de pantalla y emisión en directo.",
+      "category": "Multimedia",
+      "source": "flatpak",
+      "package": "com.obsproject.Studio",
+      "icon": "com.obsproject.Studio"
+    },
+    {
+      "id": "vscode",
+      "name": "Visual Studio Code",
+      "description": "Editor de código de Microsoft.",
+      "category": "Desarrollo",
+      "source": "flatpak",
+      "package": "com.visualstudio.code",
+      "icon": "com.visualstudio.code"
+    },
+    {
+      "id": "notepadpp",
+      "name": "Notepad++ (Windows)",
+      "description": "El editor de texto clásico de Windows, ejecutado con Wine.",
+      "category": "Utilidades",
+      "source": "wine",
+      "package": "notepadpp",
+      "icon": "accessories-text-editor",
+      "url": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.7.1/npp.8.7.1.Installer.x64.exe",
+      "sha256": "aa130d151859eccc8b4cc535ae756682069d626087e8c56a35b630df4b5f0024",
+      "args": ["/S"],
+      "installed_path": "Program Files/Notepad++/notepad++.exe"
+    },
+    {
+      "id": "7zip",
+      "name": "7-Zip (Windows)",
+      "description": "Compresor de archivos ZIP, RAR y 7z, ejecutado con Wine.",
+      "category": "Utilidades",
+      "source": "wine",
+      "package": "7zip",
+      "icon": "package-x-generic",
+      "url": "https://github.com/ip7z/7zip/releases/download/24.08/7z2408-x64.exe",
+      "sha256": "67cb9d3452c9dd974b04f4a5fd842dbcba8184f2344ff72e3662d7cdb68b099b",
+      "args": ["/S"],
+      "installed_path": "Program Files/7-Zip/7zFM.exe"
+    }
+  ]
+}

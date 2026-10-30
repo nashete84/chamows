@@ -1,0 +1,12 @@
+{
+    "KPackageStructure": "Plasma/LookAndFeel",
+    "KPlugin": {
+        "Authors": [{ "Name": "Chamows" }],
+        "Description": "Aspecto de Chamows, inspirado en Windows 11",
+        "Id": "org.chamows.desktop",
+        "License": "GPL-3.0-or-later",
+        "Name": "Chamows",
+        "Version": "0.1"
+    },
+    "X-Plasma-APIVersion": "2"
+}

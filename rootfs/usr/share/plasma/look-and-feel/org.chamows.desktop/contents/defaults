@@ -1,0 +1,17 @@
+[kcminputrc][Mouse]
+cursorTheme=Fluent-cursors
+
+[kdeglobals][General]
+ColorScheme=FluentLight
+
+[kdeglobals][Icons]
+Theme=Fluent
+
+[kwinrc][org.kde.kdecoration2]
+library=org.kde.kwin.aurorae
+theme=__aurorae__svg__Fluent-round-light
+ButtonsOnLeft=
+ButtonsOnRight=IAX
+
+[plasmarc][Theme]
+name=Fluent-round-light

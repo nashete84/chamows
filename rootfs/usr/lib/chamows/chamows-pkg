@@ -1,0 +1,69 @@
+#!/usr/bin/python3 -I
+"""Root helper for the Chamows store: install or remove one APT package.
+
+Only packages listed with source "apt" in the root-owned system catalog are
+accepted, so the store (which runs as the user) cannot install anything else.
+Called through sudo: `sudo -n /usr/lib/chamows/chamows-pkg install vlc`.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+CATALOG = os.environ.get("CHAMOWS_PKG_CATALOG_FOR_TESTS") if os.getuid() != 0 else None
+CATALOG = CATALOG or "/usr/share/chamows/catalog.json"
+APT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9+.-]+$")
+SAFE_ENV = {
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "DEBIAN_FRONTEND": "noninteractive",
+    "LANG": "C.UTF-8",
+}
+
+
+def allowed_packages(path: str) -> set:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return {
+        app["package"]
+        for app in data.get("apps", [])
+        if app.get("source") == "apt" and APT_NAME_RE.match(app.get("package", ""))
+    }
+
+
+def build_commands(action: str, package: str) -> list:
+    if action == "install":
+        return [
+            ["apt-get", "update", "-q"],
+            ["apt-get", "install", "-y", "-q", package],
+        ]
+    return [["apt-get", "remove", "-y", "-q", package]]
+
+
+def main(argv: list) -> int:
+    if len(argv) != 3 or argv[1] not in ("install", "remove"):
+        print("uso: chamows-pkg install|remove PAQUETE", file=sys.stderr)
+        return 2
+    action, package = argv[1], argv[2]
+    try:
+        allowed = allowed_packages(CATALOG)
+    except (OSError, ValueError) as exc:
+        print(f"no se pudo leer el catálogo: {exc}", file=sys.stderr)
+        return 4
+    if package not in allowed:
+        print(f"'{package}' no está en el catálogo de Chamows", file=sys.stderr)
+        return 3
+    if os.environ.get("CHAMOWS_PKG_DRY_RUN") == "1" and os.getuid() != 0:
+        for cmd in build_commands(action, package):
+            print(" ".join(cmd))
+        return 0
+    for cmd in build_commands(action, package):
+        result = subprocess.run(cmd, env=SAFE_ENV, check=False)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

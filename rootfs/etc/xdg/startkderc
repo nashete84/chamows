@@ -1,0 +1,4 @@
+# Chamows runs Plasma inside its own D-Bus session (dbus-run-session in
+# session.sh), so use the classic startup instead of systemd user units.
+[General]
+systemdBoot=false

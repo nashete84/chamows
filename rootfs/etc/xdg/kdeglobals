@@ -1,0 +1,6 @@
+[KDE]
+LookAndFeelPackage=org.chamows.desktop
+SingleClick=false
+
+[Icons]
+Theme=Fluent

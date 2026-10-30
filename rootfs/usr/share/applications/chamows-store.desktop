@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tienda Chamows
+GenericName=Instalar aplicaciones
+Comment=Instala apps de Linux, Flathub y programas de Windows
+Exec=chamows-store
+Icon=chamows-store
+Categories=System;PackageManager;
+Keywords=apps;instalar;tienda;store;exe;

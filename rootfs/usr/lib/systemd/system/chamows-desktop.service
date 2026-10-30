@@ -1,0 +1,15 @@
+[Unit]
+Description=Chamows: escritorio (TigerVNC + KDE Plasma)
+After=network.target systemd-user-sessions.service chamows-firstboot.service
+
+[Service]
+User=chamows
+PAMName=login
+WorkingDirectory=~
+Environment=LANG=es_ES.UTF-8 LANGUAGE=es_ES:es
+ExecStart=/usr/lib/chamows/session.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

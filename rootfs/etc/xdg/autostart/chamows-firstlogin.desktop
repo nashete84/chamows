@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Chamows: primer inicio
+Exec=/usr/lib/chamows/firstlogin.sh
+OnlyShowIn=KDE;
+NoDisplay=true
+X-KDE-autostart-phase=1

@@ -1,0 +1,16 @@
+[Unit]
+Description=Chamows: puente WebSocket para el escritorio en el navegador
+After=network.target chamows-desktop.service
+
+[Service]
+ExecStart=/usr/bin/websockify 127.0.0.1:6080 127.0.0.1:5901
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+# The store may install/remove catalog APT packages without a password.
+# The helper itself rejects anything that is not in the catalog.
+chamows ALL=(root) NOPASSWD: /usr/lib/chamows/chamows-pkg

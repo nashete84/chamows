@@ -1,0 +1,3 @@
+#!/bin/sh
+# Tienda Chamows
+PYTHONPATH=/usr/lib/chamows/store exec /usr/bin/python3 -m chamows_store "$@"

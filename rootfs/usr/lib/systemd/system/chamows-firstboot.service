@@ -1,0 +1,14 @@
+[Unit]
+Description=Chamows: preparación del primer arranque (claves y contraseña)
+After=cloud-init.service local-fs.target
+Before=chamows-desktop.service nginx.service xrdp.service
+ConditionPathExists=!/var/lib/chamows/firstboot.done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/chamows/firstboot.sh
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

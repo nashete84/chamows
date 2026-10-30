@@ -1,0 +1,17 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests de la tienda y del catálogo
+        run: python3 -m unittest discover -s store/tests -v
+      - name: Shellcheck
+        run: shellcheck -x scripts/*.sh rootfs/usr/lib/chamows/*.sh rootfs/usr/lib/chamows/chamows-set-password rootfs/usr/bin/chamows-store
+      - name: Plantilla de Packer
+        uses: hashicorp/setup-packer@v3
+      - run: cd packer && packer init . && packer validate .

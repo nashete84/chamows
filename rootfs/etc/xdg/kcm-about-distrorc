@@ -1,0 +1,5 @@
+[General]
+Name=Chamows
+Version=0.1 (basado en Ubuntu 24.04 LTS)
+LogoPath=/usr/share/chamows/logo.svg
+Website=https://github.com/nashete84/chamows
