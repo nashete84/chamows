@@ -1,0 +1,223 @@
+<title>Chamows</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=Figtree:wght@400;500;600&display=swap">
+<style>
+/* Layout: a single desk scene. One monitor, centred, with its controls underneath. */
+:root {
+  --desk: #0d1220;
+  --desk-2: #141b2e;
+  --bezel: #05070d;
+  --ink: #e9edf7;
+  --ink-soft: #9aa5bf;
+  --accent: #4f8dff;
+  --ok: #43d17a;
+  --display: "Sora", "Segoe UI", system-ui, sans-serif;
+  --body: "Figtree", "Segoe UI", system-ui, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: radial-gradient(120% 80% at 50% 0%, var(--desk-2), var(--desk) 70%);
+  color: var(--ink);
+  font: 15px/1.5 var(--body);
+}
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding-block: 20px 32px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid;
+  gap: 16px;
+}
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+h1 { font: 700 26px/1.1 var(--display); letter-spacing: -0.01em; margin: 0; display: flex; align-items: center; gap: 10px; }
+h1 .logo { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, #5aa2ff, #6b5bff); display: grid; place-items: center; font-size: 17px; color: #fff; }
+.sub { color: var(--ink-soft); margin: 0; max-width: 62ch; }
+.monitor {
+  background: var(--bezel);
+  border-radius: 14px;
+  padding: 10px;
+  box-shadow: 0 30px 80px rgba(0,0,0,.55), inset 0 0 0 1px rgba(255,255,255,.06);
+}
+#screen {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  max-width: 100%;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: none;
+  outline: none;
+}
+#screen:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+#screen > .text { white-space: pre; font: 14px/14px monospace; color: #ccc; position: absolute; inset: 0; padding: 8px; }
+#screen canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: auto; }
+[hidden] { display: none !important; }
+#overlay {
+  position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+  background: rgba(5,7,13,.72); color: var(--ink); font: 600 16px/1.4 var(--body); cursor: pointer; padding: 16px;
+}
+#overlay small { display: block; font-weight: 400; color: var(--ink-soft); margin-top: 6px; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.status { display: flex; align-items: center; gap: 8px; color: var(--ink-soft); margin-right: auto; font-size: 14px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #c9a227; }
+.dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+button {
+  font: 600 14px var(--body); color: var(--ink); background: #1d2640; border: 1px solid #2b3658;
+  padding: 8px 14px; border-radius: 8px; cursor: pointer;
+}
+button:hover { background: #25304f; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tips { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.tip { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); border-radius: 10px; padding: 12px 14px; min-width: 0; }
+.tip b { display: block; font-family: var(--display); font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+.tip span { color: var(--ink-soft); font-size: 14px; }
+kbd { font: 12px ui-monospace, monospace; background: #1d2640; border: 1px solid #2b3658; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--ink); }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<main>
+  <header>
+    <h1><span class="logo">C</span>Chamows</h1>
+    <p class="sub">Un sistema operativo hecho desde cero, arrancando aquí mismo en un PC emulado. Sin Linux ni Windows por debajo.</p>
+  </header>
+
+  <div class="monitor">
+    <div id="screen" tabindex="0" aria-label="Pantalla de Chamows">
+      <div class="text"></div>
+      <canvas></canvas>
+      <div id="overlay" hidden>Haz clic para usar el ratón y el teclado<small>El ratón de Chamows sigue al tuyo dentro de la pantalla</small></div>
+    </div>
+  </div>
+
+  <div class="bar">
+    <div class="status"><span class="dot" id="dot"></span><span id="status">Cargando el emulador…</span></div>
+    <button id="reset" type="button">Reiniciar</button>
+    <button id="full" type="button">Pantalla completa</button>
+  </div>
+
+  <div class="tips">
+    <div class="tip"><b>Instalar apps</b><span>Doble clic en <i>Tienda Chamows</i> y pulsa Instalar. Puedes instalar varias a la vez.</span></div>
+    <div class="tip"><b>Menú Inicio</b><span>Botón azul de la barra de tareas o tecla <kbd>F1</kbd>. Escribe para buscar.</span></div>
+    <div class="tip"><b>Terminal</b><span>Prueba <kbd>ayuda</kbd>, <kbd>apps</kbd>, <kbd>instalar snake</kbd> o <kbd>mem</kbd>.</span></div>
+    <div class="tip"><b>Ojo</b><span>Las apps viven en la memoria: al reiniciar, Chamows vuelve a estar recién instalado.</span></div>
+  </div>
+</main>
+
+<script src="libv86.js"></script>
+<script>
+(() => {
+  const W = 1024, H = 768;
+  const screen = document.getElementById("screen");
+  const overlay = document.getElementById("overlay");
+  const statusEl = document.getElementById("status");
+  const dot = document.getElementById("dot");
+  let emu, booted = false, serial = "";
+
+  // Chamows uses a PS/2 mouse, which only reports movement. We keep the
+  // guest cursor glued to the host cursor by pinning it to (0,0) at start
+  // and then sending the difference to where the host pointer is.
+  let gx = 0, gy = 0, buttons = [false, false, false];
+
+  function sendDelta(dx, dy) {
+    while (dx || dy) {
+      const sx = Math.max(-120, Math.min(120, dx)), sy = Math.max(-120, Math.min(120, dy));
+      emu.bus.send("mouse-delta", [sx, -sy]);
+      dx -= sx; dy -= sy;
+    }
+  }
+  function pin() {
+    for (let i = 0; i < 12; i++) emu.bus.send("mouse-delta", [-120, 120]);
+    gx = 0; gy = 0;
+  }
+  function moveTo(ev) {
+    if (!booted) return;
+    const r = screen.getBoundingClientRect();
+    const tx = Math.round(Math.max(0, Math.min(W - 1, (ev.clientX - r.left) / r.width * W)));
+    const ty = Math.round(Math.max(0, Math.min(H - 1, (ev.clientY - r.top) / r.height * H)));
+    sendDelta(tx - gx, ty - gy);
+    gx = tx; gy = ty;
+  }
+  function click(ev, down) {
+    if (!booted) return;
+    const b = ev.button === 2 ? 2 : ev.button === 1 ? 1 : 0;
+    buttons[b] = down;
+    emu.bus.send("mouse-click", buttons.slice());
+  }
+
+  screen.addEventListener("pointermove", moveTo);
+  screen.addEventListener("pointerdown", ev => { screen.focus(); moveTo(ev); click(ev, true); ev.preventDefault(); });
+  window.addEventListener("pointerup", ev => { if (buttons.some(Boolean)) click(ev, false); });
+  screen.addEventListener("contextmenu", ev => ev.preventDefault());
+  screen.addEventListener("keydown", ev => {
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " ", "Tab", "Backspace"].includes(ev.key)) ev.preventDefault();
+  });
+  screen.addEventListener("focus", () => { overlay.hidden = true; });
+  screen.addEventListener("blur", () => { if (booted) overlay.hidden = false; });
+  overlay.addEventListener("pointerdown", () => { overlay.hidden = true; });
+
+  // The BIOS images and the Chamows kernel are published as base64 text files.
+  async function load(name) {
+    const res = await fetch(name + ".b64.txt");
+    if (!res.ok) throw new Error(name);
+    const bin = atob((await res.text()).trim());
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return { buffer: out.buffer };
+  }
+
+  async function start() {
+    if (typeof V86 === "undefined") { statusEl.textContent = "No se pudo cargar el emulador (libv86.js)."; return; }
+    let bios, vga, kernel;
+    try {
+      [bios, vga, kernel] = await Promise.all([load("seabios"), load("vgabios"), load("chamows")]);
+    } catch (e) {
+      statusEl.textContent = "No se pudieron cargar los archivos de Chamows. Recarga la página.";
+      return;
+    }
+    emu = new V86({
+      wasm_path: "v86.wasm",
+      bios,
+      vga_bios: vga,
+      multiboot: kernel,
+      memory_size: 128 * 1024 * 1024,
+      vga_memory_size: 8 * 1024 * 1024,
+      screen_container: screen,
+      disable_mouse: true,
+      disable_speaker: true,
+      autostart: true,
+    });
+    emu.add_listener("emulator-ready", () => { statusEl.textContent = "Arrancando Chamows…"; });
+    emu.add_listener("serial0-output-byte", b => {
+      serial += String.fromCharCode(b);
+      if (!booted && serial.includes("escritorio listo")) {
+        booted = true;
+        setTimeout(pin, 300);
+        dot.classList.add("on");
+        statusEl.textContent = "Chamows está encendido";
+        if (document.activeElement !== screen) overlay.hidden = false;
+      }
+      if (serial.length > 4000) serial = serial.slice(-200);
+    });
+  }
+
+  document.getElementById("reset").addEventListener("click", () => {
+    if (!emu) return;
+    booted = false;
+    serial = "";
+    dot.classList.remove("on");
+    statusEl.textContent = "Reiniciando…";
+    emu.restart();
+    screen.focus();
+  });
+  document.getElementById("full").addEventListener("click", () => {
+    const p = screen.requestFullscreen ? screen.requestFullscreen() : null;
+    if (p && p.catch) p.catch(() => { statusEl.textContent = "Este navegador no deja usar pantalla completa aquí."; });
+    screen.focus();
+  });
+
+  start();
+})();
+</script>

@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 packer/packer_cache/
 *.part
+os/build/
+os/web/v86/
+os/web/*.b64.txt
+os/web/libv86.js
+os/web/v86.wasm
