@@ -101,6 +101,8 @@ static int vfmt(char *buf, size_t n, const char *fmt, va_list ap) {
 #undef PUT
     return (int)o;
 }
+int kvsnprintf(char *buf, size_t n, const char *fmt, va_list ap) { return vfmt(buf, n, fmt, ap); }
+
 int ksnprintf(char *buf, size_t n, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);

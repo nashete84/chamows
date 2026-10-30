@@ -242,7 +242,7 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
         ksnprintf(out, sizeof out, "%02d/%02d/%d %02d:%02d:%02d", r.day, r.month, r.year, r.hour, r.min, r.sec);
         t_print(t, out);
     } else if (!strcmp(cmd, "ver")) {
-        t_print(t, "Chamows [versión " CHAMOWS_VERSION "] - núcleo propio, sin Linux.");
+        t_print(t, ARCH_BITS == 64 ? "Chamows [versión " CHAMOWS_VERSION ", 64 bits] - núcleo propio, sin Linux." : "Chamows [versión " CHAMOWS_VERSION ", 32 bits] - núcleo propio, sin Linux.");
     } else if (!strcmp(cmd, "cls") || !strcmp(cmd, "clear")) {
         t->n = 0;
     } else if (!strcmp(cmd, "reiniciar")) {
@@ -313,7 +313,7 @@ static void pc_draw(void) {
     u32 up = ticks_ms / 1000;
     const char *labels[] = {"Procesador", "Memoria", "Pantalla", "Encendido hace", "Apps instaladas", "Disco del sistema"};
     char vals[6][64];
-    ksnprintf(vals[0], 64, "x86 de 32 bits (%s)", cpu);
+    ksnprintf(vals[0], 64, "x86 de %d bits (%s)", ARCH_BITS, cpu);
     ksnprintf(vals[1], 64, "%u MB en total · %u KB en uso", total_memory_kb / 1024, heap_used() / 1024);
     ksnprintf(vals[2], 64, "%d × %d, 32 bits de color", SCREEN_W, SCREEN_H);
     ksnprintf(vals[3], 64, "%u min %u s", up / 60, up % 60);

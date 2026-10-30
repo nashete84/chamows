@@ -8,10 +8,12 @@ typedef unsigned int u32;
 typedef unsigned long long u64;
 typedef signed char i8;
 typedef int i32;
-typedef unsigned int size_t;
+typedef signed long long i64;
+typedef unsigned long size_t;
+typedef unsigned long uptr; /* pointer-sized integer */
 #define NULL ((void *)0)
 
-#define CHAMOWS_VERSION "0.3"
+#define CHAMOWS_VERSION "0.4"
 
 /* ---- ports ---- */
 static inline void outb(u16 p, u8 v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(p)); }
@@ -36,14 +38,16 @@ char *strncpy0(char *d, const char *s, size_t n); /* always NUL-terminates */
 char *utoa(u32 v, char *buf, int base);
 char *itoa(int v, char *buf);
 /* Tiny formatter: %s %d %u %x %c %% and width for d/u (e.g. %02d). */
+#include <stdarg.h>
 int ksnprintf(char *buf, size_t n, const char *fmt, ...);
+int kvsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 
 /* ---- serial.c (COM1 log) ---- */
 void serial_init(void);
 void klog(const char *fmt, ...);
 
 /* ---- mem.c ---- */
-void heap_init(u32 start, u32 end);
+void heap_init(uptr start, uptr end);
 void *kmalloc(size_t n);
 void *kzalloc(size_t n);
 void kfree(void *p);
@@ -51,12 +55,7 @@ u32 heap_used(void);
 u32 heap_total(void);
 
 /* ---- cpu.c ---- */
-typedef struct regs {
-    u32 gs, fs, es, ds;
-    u32 edi, esi, ebp, esp, ebx, edx, ecx, eax;
-    u32 int_no, err_code;
-    u32 eip, cs, eflags, useresp, ss;
-} regs_t;
+#include "arch.h" /* regs_t and REG_IP() for this CPU */
 typedef void (*irq_handler_t)(regs_t *);
 void cpu_init(void);
 void irq_install(int irq, irq_handler_t h);

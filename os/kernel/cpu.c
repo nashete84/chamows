@@ -1,7 +1,8 @@
 /* Chamows kernel: GDT, IDT, PIC, PIT timer, exceptions, reboot/poweroff. */
 #include "kernel.h"
 
-/* ---- GDT: flat 4 GiB code and data segments, ring 0 ---- */
+#ifndef __x86_64__
+/* ---- GDT: flat 4 GiB code and data segments, ring 0 (the 64-bit GDT is in boot.asm) ---- */
 static u64 gdt[3];
 static struct { u16 limit; u32 base; } __attribute__((packed)) gdtr;
 extern void gdt_flush(void *);
@@ -15,17 +16,26 @@ static u64 gdt_entry(u32 base, u32 limit, u8 access, u8 flags) {
     e |= (u64)(base >> 24) << 56;
     return e;
 }
+#endif
 
 /* ---- IDT ---- */
+#ifdef __x86_64__
+typedef struct {
+    u16 off_lo, sel;
+    u8 ist, attr;
+    u16 off_mid;
+    u32 off_hi, zero;
+} __attribute__((packed)) idt_entry_t;
+#else
 typedef struct {
     u16 off_lo, sel;
     u8 zero, attr;
     u16 off_hi;
 } __attribute__((packed)) idt_entry_t;
+#endif
 static idt_entry_t idt[256];
-static struct { u16 limit; u32 base; } __attribute__((packed)) idtr;
-extern u32 isr_stub_table[48];
-extern void idt_load(void *);
+static struct { u16 limit; uptr base; } __attribute__((packed)) idtr;
+extern uptr isr_stub_table[48];
 
 static irq_handler_t irq_handlers[16];
 volatile u32 ticks_ms;
@@ -44,8 +54,8 @@ void panic_screen(const char *msg, u32 eip); /* gui.c */
 void isr_dispatch(regs_t *r) {
     if (r->int_no < 32) {
         const char *name = r->int_no < 20 ? exc_names[r->int_no] : "excepcion";
-        klog("\n*** EXCEPCION %u (%s) eip=%x err=%x\n", r->int_no, name, r->eip, r->err_code);
-        panic_screen(name, r->eip);
+        klog("\n*** EXCEPCION %u (%s) ip=%x err=%x\n", (u32)r->int_no, name, (u32)REG_IP(r), (u32)r->err_code);
+        panic_screen(name, (u32)REG_IP(r));
         for (;;) __asm__ volatile("cli; hlt");
     }
     int irq = (int)r->int_no - 32;
@@ -80,24 +90,29 @@ void pit_init(u32 hz) {
 }
 
 void cpu_init(void) {
+#ifndef __x86_64__
     gdt[0] = 0;
     gdt[1] = gdt_entry(0, 0xFFFFF, 0x9A, 0xC);
     gdt[2] = gdt_entry(0, 0xFFFFF, 0x92, 0xC);
     gdtr.limit = sizeof gdt - 1;
     gdtr.base = (u32)gdt;
     gdt_flush(&gdtr);
-
+#endif
     for (int i = 0; i < 48; i++) {
-        u32 a = isr_stub_table[i];
+        uptr a = isr_stub_table[i];
         idt[i].off_lo = a & 0xFFFF;
-        idt[i].off_hi = a >> 16;
         idt[i].sel = 0x08;
-        idt[i].zero = 0;
-        idt[i].attr = 0x8E;
+        idt[i].attr = 0x8E; /* present, ring 0, interrupt gate */
+#ifdef __x86_64__
+        idt[i].off_mid = (a >> 16) & 0xFFFF;
+        idt[i].off_hi = (u32)(a >> 32);
+#else
+        idt[i].off_hi = a >> 16;
+#endif
     }
     idtr.limit = sizeof idt - 1;
-    idtr.base = (u32)idt;
-    idt_load(&idtr);
+    idtr.base = (uptr)idt;
+    __asm__ volatile("lidt %0" : : "m"(idtr));
     pic_remap();
 }
 

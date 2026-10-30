@@ -1,23 +1,24 @@
 /* Tiny C helpers linked into every Chamows app. */
 #include "chamows.h"
 
-void *memset(void *d, int c, unsigned n) {
+void *memset(void *d, int c, unsigned long n) {
     unsigned char *p = d;
     while (n--) *p++ = (unsigned char)c;
     return d;
 }
-void *memcpy(void *d, const void *s, unsigned n) {
+void *memcpy(void *d, const void *s, unsigned long n) {
     unsigned char *p = d;
     const unsigned char *q = s;
     while (n--) *p++ = *q++;
     return d;
 }
-unsigned strlen(const char *s) {
-    unsigned n = 0;
+unsigned long strlen(const char *s) {
+    unsigned long n = 0;
     while (s[n]) n++;
     return n;
 }
 
+#ifndef __x86_64__
 /* 64-bit division for 32-bit code (normally in libgcc). */
 typedef unsigned long long u64;
 typedef long long i64;
@@ -44,3 +45,4 @@ i64 __divmoddi4(i64 a, i64 b, i64 *rem) {
 }
 i64 __divdi3(i64 a, i64 b) { return __divmoddi4(a, b, 0); }
 i64 __moddi3(i64 a, i64 b) { i64 r; __divmoddi4(a, b, &r); return r; }
+#endif

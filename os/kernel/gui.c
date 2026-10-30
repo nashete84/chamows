@@ -382,7 +382,7 @@ static void draw_start(surface_t *s) {
 }
 
 /* =============================================================== windows */
-#define WIN_BTN_KEY(w, b) (100000 + (int)((u32)(w) & 0xFFFFF) * 4 + (b))
+#define WIN_BTN_KEY(w, b) (100000 + (int)((uptr)(w) & 0xFFFFF) * 4 + (b))
 static rect_t btn_rect(cw_window *w, int which) { /* 0 close, 1 minimize */
     return (rect_t){w->x + w->w - 46 * (which + 1), w->y, 46, TITLE_H};
 }

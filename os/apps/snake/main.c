@@ -37,9 +37,9 @@ static void draw(cw_window *w) {
     snake_t *s = api->user(w);
     api->rect(w, 0, 0, W, TOPBAR, 0xFF2E7D32);
     char b[48];
-    api->format(b, sizeof b, "Puntos: %d", s->score, 0, 0);
+    api->format(b, sizeof b, "Puntos: %d", s->score);
     api->text(w, 12, 11, b, 0xFFFFFFFF, CW_FONT_BOLD);
-    api->format(b, sizeof b, "R\xc3\xa9" "cord: %d", s->best, 0, 0);
+    api->format(b, sizeof b, "R\xc3\xa9" "cord: %d", s->best);
     api->text(w, W - 12 - api->text_width(b, CW_FONT_BOLD), 11, b, 0xFFFFFFFF, CW_FONT_BOLD);
     for (int y = 0; y < GH; y++)
         for (int x = 0; x < GW; x++)

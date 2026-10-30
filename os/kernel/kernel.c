@@ -27,7 +27,7 @@ static u32 *video_init(int w, int h) {
     u8 b, d, f;
     if (pci_find(0x1234, 0x1111, &b, &d, &f)) addr = pci_read(b, d, f, 0x10) & ~0xFu;
     klog("video: %dx%d en %x\n", w, h, addr);
-    return (u32 *)addr;
+    return (u32 *)(uptr)addr;
 }
 
 void kmain(u32 magic, multiboot_info_t *mbi) {
@@ -44,8 +44,8 @@ void kmain(u32 magic, multiboot_info_t *mbi) {
         u32 above16 = ((hi << 8) | lo) * 64; /* KB */
         if (above16) total_memory_kb = 16 * 1024 + above16;
     }
-    u32 heap_start = ((u32)_kernel_end + 0xFFF) & ~0xFFFu;
-    u32 heap_end = total_memory_kb * 1024;
+    uptr heap_start = ((uptr)_kernel_end + 0xFFF) & ~(uptr)0xFFF;
+    uptr heap_end = (uptr)total_memory_kb * 1024;
     if (heap_end > 0x20000000) heap_end = 0x20000000; /* 512 MB is plenty */
     heap_init(heap_start, heap_end);
     klog("memoria: %u MB, montón %u KB\n", total_memory_kb / 1024, heap_total() / 1024);

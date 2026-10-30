@@ -113,7 +113,29 @@ int app_uninstall(const char *id) {
     return 0;
 }
 
-/* ---- ELF loader: 32-bit position-independent executables ---- */
+/* ---- ELF loader: position-independent executables (ELF32 i386 or ELF64 x86-64) ---- */
+#ifdef __x86_64__
+typedef struct {
+    u8 ident[16];
+    u16 type, machine;
+    u32 version;
+    u64 entry, phoff, shoff;
+    u32 flags;
+    u16 ehsize, phentsize, phnum, shentsize, shnum, shstrndx;
+} elf_hdr_t;
+typedef struct { u32 type, flags; u64 offset, vaddr, paddr, filesz, memsz, align; } elf_phdr_t;
+typedef struct { i64 tag; u64 val; } elf_dyn_t;
+typedef struct { u64 offset, info; i64 addend; } elf_rel_t;
+#define ELF_CLASS 2
+#define ELF_MACHINE 62               /* EM_X86_64 */
+#define DT_REL_TAB 7                 /* DT_RELA */
+#define DT_REL_SIZE 8
+#define DT_REL_ENT 9
+#define DT_WRONG 17                  /* DT_REL: not used on x86-64 */
+#define R_RELATIVE 8                 /* R_X86_64_RELATIVE */
+#define REL_TYPE(i) ((u32)(i))
+#define ARCH_NAME "64 bits"
+#else
 typedef struct {
     u8 ident[16];
     u16 type, machine;
@@ -123,15 +145,25 @@ typedef struct {
 typedef struct { u32 type, offset, vaddr, paddr, filesz, memsz, flags, align; } elf_phdr_t;
 typedef struct { i32 tag; u32 val; } elf_dyn_t;
 typedef struct { u32 offset, info; } elf_rel_t;
+#define ELF_CLASS 1
+#define ELF_MACHINE 3                /* EM_386 */
+#define DT_REL_TAB 17                /* DT_REL */
+#define DT_REL_SIZE 18
+#define DT_REL_ENT 19
+#define DT_WRONG 7                   /* DT_RELA: not used on i386 */
+#define R_RELATIVE 8                 /* R_386_RELATIVE */
+#define REL_TYPE(i) ((i) & 0xFF)
+#define ARCH_NAME "32 bits"
+#endif
 
-static const char *elf_load(const u8 *file, u32 size, u8 **mem_out, u32 *entry_out) {
+static const char *elf_load(const u8 *file, u32 size, u8 **mem_out, uptr *entry_out) {
     const elf_hdr_t *h = (const elf_hdr_t *)file;
     if (size < sizeof *h || memcmp(h->ident, "\x7f" "ELF", 4) != 0) return "no es un archivo ELF";
-    if (h->ident[4] != 1 || h->machine != 3) return "no es un programa de 32 bits para x86";
+    if (h->ident[4] != ELF_CLASS || h->machine != ELF_MACHINE) return "no es un programa de " ARCH_NAME " para x86";
     if (h->type != 3) return "el programa no es reubicable (PIE)";
-    if (h->phoff + (u32)h->phnum * sizeof(elf_phdr_t) > size) return "cabeceras dañadas";
+    if (h->phoff + (uptr)h->phnum * sizeof(elf_phdr_t) > size) return "cabeceras dañadas";
     const elf_phdr_t *ph = (const elf_phdr_t *)(file + h->phoff);
-    u32 lo = 0xFFFFFFFF, hi = 0;
+    uptr lo = (uptr)-1, hi = 0;
     for (int i = 0; i < h->phnum; i++) {
         if (ph[i].type != 1) continue;
         if (ph[i].vaddr < lo) lo = ph[i].vaddr;
@@ -141,24 +173,28 @@ static const char *elf_load(const u8 *file, u32 size, u8 **mem_out, u32 *entry_o
     if (hi <= lo || hi - lo > 8 * 1024 * 1024) return "tamaño de programa no válido";
     u8 *mem = kzalloc(hi - lo + 16);
     if (!mem) return "sin memoria";
-    u32 base = (((u32)mem + 15) & ~15u) - lo;
+    uptr base = (((uptr)mem + 15) & ~(uptr)15) - lo;
     for (int i = 0; i < h->phnum; i++)
         if (ph[i].type == 1) memcpy((u8 *)(base + ph[i].vaddr), file + ph[i].offset, ph[i].filesz);
-    /* relocations */
+    /* relocations: only "add the load address" ones, so apps can't import anything */
     for (int i = 0; i < h->phnum; i++) {
         if (ph[i].type != 2) continue; /* PT_DYNAMIC */
         const elf_dyn_t *d = (const elf_dyn_t *)(base + ph[i].vaddr);
-        u32 rel = 0, relsz = 0, relent = sizeof(elf_rel_t);
+        uptr rel = 0, relsz = 0, relent = sizeof(elf_rel_t);
         for (; d->tag; d++) {
-            if (d->tag == 17) rel = d->val;
-            else if (d->tag == 18) relsz = d->val;
-            else if (d->tag == 19) relent = d->val;
-            else if (d->tag == 7) { kfree(mem); return "reubicaciones RELA no admitidas"; }
+            if (d->tag == DT_REL_TAB) rel = d->val;
+            else if (d->tag == DT_REL_SIZE) relsz = d->val;
+            else if (d->tag == DT_REL_ENT) relent = d->val;
+            else if (d->tag == DT_WRONG) { kfree(mem); return "formato de reubicaciones no admitido"; }
         }
-        for (u32 off = 0; rel && off < relsz; off += relent) {
+        for (uptr off = 0; rel && off < relsz; off += relent) {
             const elf_rel_t *r = (const elf_rel_t *)(base + rel + off);
-            u32 type = r->info & 0xFF;
-            if (type == 8) *(u32 *)(base + r->offset) += base; /* R_386_RELATIVE */
+            u32 type = REL_TYPE(r->info);
+#ifdef __x86_64__
+            if (type == R_RELATIVE) *(u64 *)(base + r->offset) = base + (u64)r->addend;
+#else
+            if (type == R_RELATIVE) *(u32 *)(base + r->offset) += base;
+#endif
             else if (type != 0) { kfree(mem); return "el programa usa bibliotecas externas"; }
         }
     }
@@ -170,7 +206,7 @@ static const char *elf_load(const u8 *file, u32 size, u8 **mem_out, u32 *entry_o
 int app_run(installed_app_t *a) {
     struct app_instance *inst = kzalloc(sizeof *inst);
     if (!inst) return -1;
-    u32 entry;
+    uptr entry;
     const char *err = elf_load(a->elf, a->elf_size, &inst->mem, &entry);
     if (err) {
         klog("no se pudo abrir %s: %s\n", a->entry->id, err);
@@ -236,7 +272,13 @@ static unsigned rng = 0x1234567;
 static unsigned api_random(void) { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng + ticks_ms; }
 static void api_clock(int *h, int *m, int *s) { rtc_time_t t; rtc_read(&t); if (h) *h = t.hour; if (m) *m = t.min; if (s) *s = t.sec; }
 static void api_date(int *d, int *mo, int *y) { rtc_time_t t; rtc_read(&t); if (d) *d = t.day; if (mo) *mo = t.month; if (y) *y = t.year; }
-static int api_format(char *buf, int n, const char *fmt, int a, int b, int c) { return ksnprintf(buf, (size_t)n, fmt, a, b, c); }
+static int api_format(char *buf, int n, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = kvsnprintf(buf, (size_t)n, fmt, ap);
+    va_end(ap);
+    return r;
+}
 static void api_log(const char *m) { klog("[app] %s\n", m); }
 
 static const cw_api api_table = {

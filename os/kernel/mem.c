@@ -7,8 +7,7 @@ typedef struct block {
     u32 size;            /* payload bytes */
     u32 magic;
     struct block *next;  /* next free block (only while free) */
-    u32 pad;
-} block_t;
+} __attribute__((aligned(16))) block_t; /* 16 bytes on 32-bit, 32 on 64-bit: keeps payloads 16-aligned */
 
 #define MAGIC_FREE 0xF4EEB10C
 #define MAGIC_USED 0x05EDB10C
@@ -17,8 +16,8 @@ typedef struct block {
 static block_t *free_list;
 static u32 total, used;
 
-void heap_init(u32 start, u32 end) {
-    start = (start + 15) & ~15u;
+void heap_init(uptr start, uptr end) {
+    start = (start + 15) & ~(uptr)15;
     free_list = (block_t *)start;
     free_list->size = end - start - HDR;
     free_list->magic = MAGIC_FREE;
@@ -29,7 +28,7 @@ void heap_init(u32 start, u32 end) {
 
 void *kmalloc(size_t n) {
     if (!n) n = 1;
-    n = (n + 15) & ~15u;
+    n = (n + 15) & ~(uptr)15;
     block_t *prev = NULL;
     for (block_t *b = free_list; b; prev = b, b = b->next) {
         if (b->size < n) continue;
@@ -60,7 +59,7 @@ void *kzalloc(size_t n) {
 void kfree(void *p) {
     if (!p) return;
     block_t *b = (block_t *)((u8 *)p - HDR);
-    if (b->magic != MAGIC_USED) { klog("kfree: puntero no válido %x\n", (u32)p); return; }
+    if (b->magic != MAGIC_USED) { klog("kfree: puntero no válido %x\n", (u32)(uptr)p); return; }
     used -= b->size + HDR;
     b->magic = MAGIC_FREE;
     block_t *prev = NULL, *cur = free_list;

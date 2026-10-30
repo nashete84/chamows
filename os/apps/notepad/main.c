@@ -76,9 +76,9 @@ static void draw(cw_window *w) {
     api->rect(w, 0, H - BOTTOM, W, BOTTOM, 0xFFF3F3F3);
     api->rect(w, 0, H - BOTTOM, W, 1, 0xFFE5E5E5);
     char st[64];
-    api->format(st, sizeof st, "L\xc3\xadn. %d, col. %d", curline + 1, curcol + 1, 0);
+    api->format(st, sizeof st, "L\xc3\xadn. %d, col. %d", curline + 1, curcol + 1);
     api->text(w, 12, H - BOTTOM + 6, st, 0xFF404040, CW_FONT_UI);
-    api->format(st, sizeof st, "%d caracteres", n->len, 0, 0);
+    api->format(st, sizeof st, "%d caracteres", n->len);
     api->text(w, 200, H - BOTTOM + 6, st, 0xFF404040, CW_FONT_UI);
     api->text(w, W - 160, H - BOTTOM + 6, "Windows (CRLF)   UTF-8", 0xFF404040, CW_FONT_UI);
     api->invalidate(w);
