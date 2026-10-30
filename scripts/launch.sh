@@ -34,7 +34,9 @@ aws sts get-caller-identity >/dev/null || die "la AWS CLI no tiene credenciales 
 if [ -z "$AMI" ]; then
   AMI=$(aws ec2 describe-images --owners self --filters "Name=name,Values=chamows-*" \
         --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
-  [ -n "$AMI" ] && [ "$AMI" != "None" ] || die "no hay ninguna AMI de Chamows en $REGION. Construye una con Packer (ver README)."
+  if [ -z "$AMI" ] || [ "$AMI" = "None" ]; then
+    die "no hay ninguna AMI de Chamows en $REGION. Construye una con Packer (ver README)."
+  fi
 fi
 
 MY_IP=$(curl -fsS https://checkip.amazonaws.com | tr -d '[:space:]')
