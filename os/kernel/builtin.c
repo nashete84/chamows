@@ -1,5 +1,7 @@
 /* Chamows built-in apps: Tienda Chamows, Terminal, Este equipo. */
 #include "gui.h"
+#include "fat.h"
+#include "usb/usb.h"
 
 #define C_TEXT   0xFF1B1D24
 #define C_MUTED  0xFF6B7080
@@ -198,6 +200,8 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
                    "  mem                 memoria usada\n"
                    "  hora                fecha y hora\n"
                    "  ver                 versión de Chamows\n"
+                   "  usb                 dispositivos USB conectados\n"
+                   "  dir [carpeta]       archivos del pendrive (D:)\n"
                    "  cls                 limpia la pantalla\n"
                    "  reiniciar | apagar");
     } else if (!strcmp(cmd, "apps")) {
@@ -225,7 +229,7 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
         const repo_entry_t *e = repo_find(arg);
         if (!e) { ksnprintf(out, sizeof out, "No existe la app '%s'. Escribe: tienda", arg); t_print(t, out); return; }
         if (installed_find(arg)) { ksnprintf(out, sizeof out, "%s ya está instalada.", e->name); t_print(t, out); return; }
-        ksnprintf(out, sizeof out, "Copiando %u bytes de %s a C:\\Apps...", e->elf_size, e->id);
+        ksnprintf(out, sizeof out, fat_mounted ? "Copiando %u bytes de %s al pendrive (D:\\CHAMOWS)..." : "Copiando %u bytes de %s a C:\\Apps (memoria)...", e->elf_size, e->id);
         t_print(t, out);
         t_print(t, app_install(arg) == 0 ? "Instalada. Ábrela con: abrir <id>" : "Error: no queda memoria.");
     } else if (!strcmp(cmd, "desinstalar")) {
@@ -243,6 +247,27 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
         t_print(t, out);
     } else if (!strcmp(cmd, "ver")) {
         t_print(t, ARCH_BITS == 64 ? "Chamows [versión " CHAMOWS_VERSION ", 64 bits] - núcleo propio, sin Linux." : "Chamows [versión " CHAMOWS_VERSION ", 32 bits] - núcleo propio, sin Linux.");
+    } else if (!strcmp(cmd, "usb")) {
+        if (!usb_controllers) { t_print(t, "No hay controlador USB (xHCI) en este equipo."); return; }
+        int n = 0;
+        for (usb_dev_t *d = usb_devices; d; d = d->next, n++) {
+            ksnprintf(out, sizeof out, "  Puerto %d: %s (%x:%x)", d->port, d->name, d->desc.vendor, d->desc.product);
+            t_print(t, out);
+        }
+        if (!n) t_print(t, "No hay dispositivos USB conectados.");
+    } else if (!strcmp(cmd, "dir")) {
+        if (!fat_mounted) { t_print(t, usb_disk.present ? "El pendrive no tiene formato FAT32." : "No hay ningún pendrive conectado."); return; }
+        static fat_entry_t list[64];
+        int n = fat_list(arg, list, 64);
+        if (n < 0) { t_print(t, "No existe esa carpeta."); return; }
+        ksnprintf(out, sizeof out, " Directorio de D:\\%s  (pendrive %s, %u MB libres)", arg, fat_label, fat_free_mb());
+        t_print(t, out);
+        for (int i = 0; i < n && i < 64; i++) {
+            if (list[i].is_dir) ksnprintf(out, sizeof out, "  <DIR>          %s", list[i].name);
+            else ksnprintf(out, sizeof out, "  %u bytes%s %s", list[i].size, list[i].size < 10 ? "      " : list[i].size < 1000 ? "    " : list[i].size < 100000 ? "  " : "", list[i].name);
+            t_print(t, out);
+        }
+        if (!n) t_print(t, "  (vacía)");
     } else if (!strcmp(cmd, "cls") || !strcmp(cmd, "clear")) {
         t->n = 0;
     } else if (!strcmp(cmd, "reiniciar")) {
@@ -311,17 +336,23 @@ static void pc_draw(void) {
     cpu_vendor(cpu);
     rtc_time_t r; rtc_read(&r);
     u32 up = ticks_ms / 1000;
-    const char *labels[] = {"Procesador", "Memoria", "Pantalla", "Encendido hace", "Apps instaladas", "Disco del sistema"};
-    char vals[6][64];
+    const char *labels[] = {"Procesador", "Memoria", "Pantalla", "Encendido hace", "Apps instaladas", "Disco del sistema", "Pendrive (D:)", "USB"};
+    char vals[8][64];
     ksnprintf(vals[0], 64, "x86 de %d bits (%s)", ARCH_BITS, cpu);
     ksnprintf(vals[1], 64, "%u MB en total · %u KB en uso", total_memory_kb / 1024, heap_used() / 1024);
     ksnprintf(vals[2], 64, "%d × %d, 32 bits de color", SCREEN_W, SCREEN_H);
     ksnprintf(vals[3], 64, "%u min %u s", up / 60, up % 60);
     ksnprintf(vals[4], 64, "%d de %d disponibles", installed_count(), repo_count());
     ksnprintf(vals[5], 64, "Solo lectura, dentro del núcleo");
+    if (fat_mounted) ksnprintf(vals[6], 64, "%s · %u MB libres · las apps se guardan aquí", fat_label, fat_free_mb());
+    else ksnprintf(vals[6], 64, usb_disk.present ? "Conectado, pero no es FAT32" : "No conectado (las apps viven en memoria)");
+    int nd = 0;
+    for (usb_dev_t *d = usb_devices; d; d = d->next) nd++;
+    if (usb_controllers) ksnprintf(vals[7], 64, "%d dispositivos conectados", nd);
+    else ksnprintf(vals[7], 64, "Sin controlador USB");
     int y = 100;
-    fill_round(s, 20, y - 8, w->w - 40, 6 * 30 + 16, 8, 0xFFFFFFFF);
-    for (int i = 0; i < 6; i++, y += 30) {
+    fill_round(s, 20, y - 8, w->w - 40, 8 * 30 + 16, 8, 0xFFFFFFFF);
+    for (int i = 0; i < 8; i++, y += 30) {
         text_draw(s, FONT_UI, 36, y, labels[i], C_MUTED);
         text_draw(s, FONT_BOLD, 180, y, vals[i], C_TEXT);
     }
@@ -335,7 +366,7 @@ static void pc_event(cw_window *w, const cw_event *ev) {
 }
 void pc_open(void) {
     if (pc_win) { win_focus(pc_win); return; }
-    pc_win = win_create("Este equipo", 520, 310, pc_event, NULL, &ICON_PC);
+    pc_win = win_create("Este equipo", 620, 370, pc_event, NULL, &ICON_PC);
     if (!pc_win) return;
     pc_win->timer_ms = 1000;
     pc_win->next_tick = ticks_ms + 1000;

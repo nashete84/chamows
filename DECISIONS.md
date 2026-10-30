@@ -8,11 +8,20 @@
 - **Por qué:** es lo que se pidió. El coste es que muchas cosas (red, disco, drivers)
   hay que escribirlas a mano y llegarán más tarde.
 
-## 2. 32 bits x86 y Multiboot
-- **Elegido:** i386 en modo protegido, arrancado con Multiboot 1 (`-kernel` de QEMU).
-- **Descartado:** 64 bits (necesita paginación y un cargador más complejo; v86 no lo emula)
-  y ARM (el Mac M1 lo correría nativo, pero no se puede probar en el navegador).
-- **Por qué:** así se prueba igual en el navegador (v86) y en el Mac (QEMU).
+## 2. 64 bits, y 32 bits para la web, desde el mismo código
+- **Elegido (v0.4):** el código compila dos versiones. La de 64 bits (x86-64, modo largo)
+  es la principal y tiene USB; la de 32 bits (i386) existe porque el emulador del
+  navegador (v86) solo hace 32 bits. Lo específico de cada CPU vive en
+  `kernel/arch/<arch>/` (arranque, interrupciones, registros); el resto es común.
+- **Descartado:** solo 64 bits con la web congelada (Nacho prefirió mantener la web al día)
+  y quedarse en 32 bits (Nacho pidió 64).
+- **Cómo arranca en 64 bits:** Multiboot 1 nos deja en 32 bits; `boot.asm` mapea los
+  primeros 4 GB 1:1 con páginas de 2 MB, activa el modo largo y salta a C. Así QEMU
+  `-kernel` sigue sirviendo sin GRUB.
+- **Detalle:** en 64 bits todo se compila sin "red zone", porque las interrupciones usan
+  la misma pila que el núcleo y las apps.
+- **Coste:** la API de apps cambió a v2 (`format` pasa a ser variádica, porque en 64 bits
+  un puntero no cabe en un `int`). Las apps se compilan dos veces.
 
 ## 3. Gráficos por el adaptador Bochs (BGA)
 - **Elegido:** pedir 1024×768×32 al adaptador BGA (puertos 0x1CE/0x1CF) y dibujar en su
@@ -38,9 +47,10 @@
 - **Elegido:** las apps vienen empaquetadas en un repositorio (`CHREPO01`) dentro de la
   imagen del sistema; instalar copia el ELF a memoria (`C:\Apps`). Varias instalaciones
   pueden ir a la vez.
-- **Descartado (por ahora):** descargarlas de internet (no hay driver de red) y guardarlas
-  en disco (no hay driver ATA ni sistema de archivos).
-- **Consecuencia:** al reiniciar, las apps instaladas se pierden. Es lo siguiente a resolver.
+- **Descartado (por ahora):** descargarlas de internet (no hay driver de red).
+- **Desde v0.4:** si hay un pendrive FAT32, la app también se copia a
+  `CHAMOWS/APPS64/<ID>.ELF` (o `APPS32`) y al arrancar se vuelve a instalar desde ahí.
+  Cada versión usa su carpeta porque sus programas son distintos.
 
 ## 7. Sin protección entre apps y núcleo (anillo 0)
 - **Elegido:** las apps corren en el mismo espacio y nivel que el núcleo.
@@ -68,3 +78,26 @@
 ## 11. AWS
 - La versión con núcleo propio no se puede usar en una VM normal de AWS: EC2 no da
   pantalla gráfica. Para "en la nube" la vía es la página web con v86.
+
+## 12. USB con xHCI, sin interrupciones
+- **Elegido:** solo el controlador xHCI (USB 3, también maneja USB 1.1 y 2.0), consultado
+  desde el bucle del escritorio cada 10 ms en vez de usar interrupciones.
+- **Descartado:** UHCI/OHCI/EHCI (controladores antiguos; QEMU, UTM y los PC actuales
+  usan xHCI) e interrupciones MSI (más código para la misma respuesta en un escritorio).
+- **Límites:** sin hubs USB, sin conectar en caliente (los dispositivos se detectan al
+  arrancar), y el controlador tiene que estar por debajo de 4 GB.
+
+## 13. Teclado, ratón y tableta USB
+- **Teclado:** informe "boot" de 8 bytes. Cada tecla se traduce al código PS/2 y entra por
+  el mismo traductor de teclado español, así ñ, tildes y AltGr funcionan igual. La
+  repetición de teclas (500 ms y luego 30 por segundo) la hace Chamows, como Windows.
+- **Ratón y tableta:** se lee el descriptor de informes HID para encontrar X, Y y botones.
+  Una tableta (QEMU, UTM) da posiciones absolutas: el cursor va exactamente donde está
+  el tuyo, sin capturar el ratón.
+
+## 14. Pendrives: SCSI sobre "bulk-only" y FAT32
+- **Elegido:** el protocolo que usan casi todos los pendrives (clase 8, SCSI, BOT) y FAT32,
+  con o sin tabla de particiones. Lectura y escritura de 4 KB en 4 KB.
+- **Descartado:** exFAT y NTFS (más complejos; exFAT tiene patentes hasta hace poco),
+  nombres largos (solo se leen como nombre corto 8.3).
+- **Comprobado:** `fsck.fat` no encuentra errores tras instalar y desinstalar apps.

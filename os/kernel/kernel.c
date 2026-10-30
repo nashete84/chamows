@@ -1,6 +1,7 @@
 /* Chamows kernel entry point. */
 #include "gui.h"
 #include "usb/usb.h"
+#include "fat.h"
 
 u32 total_memory_kb;
 extern u8 _kernel_end[];
@@ -64,6 +65,7 @@ void kmain(u32 magic, multiboot_info_t *mbi) {
     }
     repo_init();
     usb_init();
+    if (fat_mount() == 0) apps_load_from_disk();
     gui_init(lfb, sw, sh);
     gui_run();
 }

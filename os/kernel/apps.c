@@ -1,6 +1,7 @@
 /* Chamows apps: the repository on the system disk, installing into memory,
  * loading app ELF files and the API they call. */
 #include "gui.h"
+#include "fat.h"
 
 /* ---- repository (built by tools/mkrepo.py, linked in by repo.asm) ---- */
 extern const u8 repo_blob[];
@@ -44,24 +45,74 @@ installed_app_t *installed_find(const char *id) {
     return NULL;
 }
 
+/* Installed apps are kept on the pendrive, when there is one, as
+ * CHAMOWS/APPS64/<ID>.ELF (or APPS32 for the 32-bit build, whose programs
+ * are different), so they are still there after a restart. */
+#define APPS_DIR (ARCH_BITS == 64 ? "CHAMOWS/APPS64" : "CHAMOWS/APPS32")
+static void app_file(const char *id, char *out, int n) {
+    char up[16];
+    int i = 0;
+    for (; id[i] && i < 8; i++) up[i] = (id[i] >= 'a' && id[i] <= 'z') ? (char)(id[i] - 32) : id[i];
+    up[i] = 0;
+    ksnprintf(out, (size_t)n, "%s/%s.ELF", APPS_DIR, up);
+}
+
+static int add_installed(const repo_entry_t *e, u8 *elf, u32 size) {
+    installed_app_t *a = kmalloc(sizeof *a);
+    if (!a) return -3;
+    *a = (installed_app_t){e, repo_icon(e), elf, size};
+    installed[n_installed++] = a;
+    return 0;
+}
+
 int app_install(const char *id) {
     const repo_entry_t *e = repo_find(id);
     if (!e) return -1;
     if (installed_find(id)) return 0;
     if (n_installed == MAX_INSTALLED) return -2;
     u8 *copy = kmalloc(e->elf_size);
-    installed_app_t *a = kmalloc(sizeof *a);
-    if (!copy || !a) { kfree(copy); kfree(a); return -3; }
+    if (!copy) return -3;
     memcpy(copy, repo_elf(e), e->elf_size);
-    *a = (installed_app_t){e, repo_icon(e), copy, e->elf_size};
-    installed[n_installed++] = a;
-    klog("instalada: %s (%u bytes)\n", id, e->elf_size);
+    if (add_installed(e, copy, e->elf_size) != 0) { kfree(copy); return -3; }
+    if (fat_mounted) {
+        char path[40];
+        app_file(id, path, sizeof path);
+        if (fat_write(path, copy, e->elf_size) == 0) klog("instalada: %s en el pendrive (%s)\n", id, path);
+        else klog("instalada: %s solo en memoria (no se pudo escribir en el pendrive)\n", id);
+    } else {
+        klog("instalada: %s (%u bytes)\n", id, e->elf_size);
+    }
     shell_refresh();
     return 0;
 }
 
+/* At boot: install again every app found on the pendrive. */
+void apps_load_from_disk(void) {
+    if (!fat_mounted) return;
+    if (fat_mkdir("CHAMOWS") != 0 || fat_mkdir(APPS_DIR) != 0) { klog("apps: no se pudo crear %s en el pendrive\n", APPS_DIR); return; }
+    fat_entry_t list[32];
+    int n = fat_list(APPS_DIR, list, 32);
+    for (int i = 0; i < n && i < 32; i++) {
+        char id[13];
+        int k = 0;
+        for (; list[i].name[k] && list[i].name[k] != '.'; k++)
+            id[k] = (list[i].name[k] >= 'A' && list[i].name[k] <= 'Z') ? (char)(list[i].name[k] + 32) : list[i].name[k];
+        id[k] = 0;
+        if (list[i].is_dir || strcmp(list[i].name + k, ".ELF") != 0) continue;
+        const repo_entry_t *e = repo_find(id);
+        if (!e || installed_find(id) || n_installed == MAX_INSTALLED) continue;
+        char path[40];
+        app_file(id, path, sizeof path);
+        u8 *elf;
+        u32 size;
+        if (fat_read(path, &elf, &size) != 0) { klog("apps: no se pudo leer %s\n", path); continue; }
+        if (add_installed(e, elf, size) != 0) { kfree(elf); continue; }
+        klog("apps: %s cargada desde el pendrive\n", id);
+    }
+}
+
 /* ---- running apps ---- */
-typedef struct alloc_hdr { struct alloc_hdr *next; u32 pad[3]; } alloc_hdr_t;
+typedef struct alloc_hdr { struct alloc_hdr *next; } __attribute__((aligned(16))) alloc_hdr_t;
 struct app_instance {
     installed_app_t *app;
     u8 *mem;
@@ -109,6 +160,11 @@ int app_uninstall(const char *id) {
     n_installed--;
     kfree(a->elf);
     kfree(a);
+    if (fat_mounted) {
+        char path[40];
+        app_file(id, path, sizeof path);
+        fat_delete(path);
+    }
     shell_refresh();
     return 0;
 }
