@@ -22,6 +22,7 @@ RUN_NOW=0
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+[ -f /etc/os-release ] || die "este script se ejecuta dentro de la máquina Ubuntu 24.04 de AWS, no en tu ordenador"
 [ "$(id -u)" -eq 0 ] || die "ejecuta este script con sudo"
 # shellcheck disable=SC1091
 . /etc/os-release
