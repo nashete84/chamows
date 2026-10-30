@@ -1,0 +1,21 @@
+name: Compilar y arrancar Chamows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar herramientas
+        run: sudo apt-get update && sudo apt-get install -y nasm python3-pil fonts-dejavu-core qemu-system-x86
+      - name: Compilar núcleo y apps
+        run: make -C os
+      - name: Arrancar en QEMU hasta el escritorio
+        run: make -C os test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chamows-bin
+          path: os/build/chamows.bin
