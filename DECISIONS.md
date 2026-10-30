@@ -54,6 +54,7 @@ imagen de AWS (AMI) con Packer:
 | 15 | Español (es_ES) e idioma de teclado `es` por defecto | Inglés | Nacho escribe en español. |
 | 16 | Compositor de ventanas apagado | Efectos activados | En VNC no hay GPU; los efectos lo hacen lento. |
 | 17 | Bloqueo de pantalla desactivado | Bloqueo activado | El acceso ya pide contraseña; un segundo bloqueo dentro de VNC confunde. |
+| 21 | En máquinas ARM (Mac con chip Apple vía Multipass) se instala sin Wine y la tienda oculta los `.exe` | Fallar la instalación | Nacho quiere probar en su Mac; Wine solo ejecuta programas de Windows en procesadores Intel/AMD. |
 | 18 | Instancia por defecto `t3.large`, región `eu-west-1`, disco 30 GB | `t3.medium`; `eu-south-2` | Plasma + Wine necesitan ~4-8 GB de RAM. `eu-west-1` tiene todo el catálogo de AMIs de Ubuntu; la región es una variable. |
 | 19 | Plasma arranca con `dbus-run-session` y `systemdBoot=false` | Arranque de Plasma con servicios de systemd de usuario | El escritorio vive dentro de un servicio de sistema, no de un inicio de sesión gráfico; el arranque clásico evita que Plasma use un bus D-Bus distinto al de la sesión. |
 | 20 | Paquetes dudosos como opcionales (`tigervnc-tools`, packs de idioma, `kde-spectacle`) | Lista fija | Si un nombre no existe en Ubuntu 24.04, la instalación sigue en lugar de fallar entera. |

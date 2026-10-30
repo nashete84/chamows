@@ -44,7 +44,14 @@ available() {
 
 # ---------------------------------------------------------------- packages
 log "Actualizando el sistema"
-dpkg --add-architecture i386
+ARCH=$(dpkg --print-architecture)
+WINE_PKGS=()
+if [ "$ARCH" = "amd64" ]; then
+  dpkg --add-architecture i386
+  WINE_PKGS=(wine wine64 wine32:i386)
+else
+  echo "  Arquitectura $ARCH: sin Wine (los .exe de Windows necesitan un procesador Intel/AMD)" >&2
+fi
 apt-get update -q
 apt-get "${APT_OPTS[@]}" dist-upgrade
 
@@ -55,13 +62,13 @@ CORE_PKGS=(
   locales
   fonts-noto-core fonts-noto-color-emoji
   tigervnc-standalone-server novnc websockify nginx xrdp ssl-cert
-  flatpak wine wine64 wine32:i386
+  flatpak
   python3 python3-pyqt5
   git gnupg curl ca-certificates openssl librsvg2-bin
 )
 OPTIONAL_PKGS=(tigervnc-tools kde-spectacle language-pack-es language-pack-kde-es)
 mapfile -t EXTRA < <(available "${OPTIONAL_PKGS[@]}")
-apt-get "${APT_OPTS[@]}" install "${CORE_PKGS[@]}" "${EXTRA[@]}"
+apt-get "${APT_OPTS[@]}" install "${CORE_PKGS[@]}" ${WINE_PKGS[@]+"${WINE_PKGS[@]}"} "${EXTRA[@]}"
 command -v tigervncpasswd >/dev/null || die "falta tigervncpasswd"
 
 log "Instalando Firefox desde el repositorio oficial de Mozilla"

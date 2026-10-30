@@ -166,7 +166,10 @@ QLineEdit { padding: 6px 10px; border-radius: 4px; border: 1px solid #d0d0d0; ba
 class StoreWindow(QMainWindow):
     def __init__(self, apps: list[App]) -> None:
         super().__init__()
-        self.apps = apps
+        # Without Wine (e.g. ARM machines) hide the Windows programs.
+        self.has_wine = shutil.which("wine") is not None
+        self.apps = apps if self.has_wine else [a for a in apps if a.source != "wine"]
+        apps = self.apps
         self.flathub_results: list[App] = []
         self.flatpak_ids: set[str] = set()
         self.runner = Runner()
@@ -181,7 +184,7 @@ class StoreWindow(QMainWindow):
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
         self.nav.setFixedWidth(220)
-        for name in [ALL, *categories(apps), FLATHUB, EXE]:
+        for name in [ALL, *categories(apps), FLATHUB, *([EXE] if self.has_wine else [])]:
             QListWidgetItem(name, self.nav)
         self.nav.currentTextChanged.connect(self._on_nav)
 

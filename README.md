@@ -79,6 +79,25 @@ sudo ./scripts/install.sh --now
 
 La contraseña aparece al final.
 
+### Probar en tu Mac, sin AWS
+
+Con [Multipass](https://multipass.run) creas una máquina Ubuntu dentro del Mac:
+
+```bash
+brew install multipass
+multipass launch 24.04 --name chamows --cpus 2 --memory 6G --disk 30G
+multipass shell chamows
+# dentro de la máquina:
+git clone https://github.com/nashete84/chamows && cd chamows
+sudo ./scripts/install.sh --now
+```
+
+Después, en el Mac, `multipass info chamows` te da la IP; abre `https://ESA-IP`.
+
+En Macs con chip Apple (M1 a M4) la máquina es ARM: no hay Wine, así que no
+se instalan `.exe`, y algunas apps de Flathub (Chrome, Spotify, Zoom, Discord)
+no existen para ARM. Todo lo demás funciona igual.
+
 ## Estructura
 
 | Carpeta | Contenido |
