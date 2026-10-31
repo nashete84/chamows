@@ -1,6 +1,6 @@
 /* Chamows FAT32 driver: enough to keep files on a pendrive.
  * Supports a whole-disk FAT32 or the first FAT32 partition of an MBR disk,
- * 512-byte sectors, 8.3 names, subfolders, create/replace/delete. */
+ * 512-byte sectors, 8.3 names (long names are read, not written), subfolders, create/replace/delete. */
 #include "fat.h"
 #include "usb/usb.h"
 
@@ -179,42 +179,104 @@ static void from83(const char *n, char out[13]) {
 
 static u32 ent_cluster(const dirent_t *e) { return (u32)e->clus_hi << 16 | e->clus_lo; }
 
-/* Finds name83 in directory `dir`. On success copies the entry and where it lives. */
+/* Long names: LFN entries come before the short entry, last part first.
+ * Each holds 13 UTF-16 characters; we keep the ASCII/Latin-1 ones. */
+typedef struct { char s[64]; int ok; } lfn_t;
+static void lfn_add(lfn_t *l, const u8 *e) {
+    static const u8 off[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+    int ord = e[0] & 0x1F;
+    if (e[0] & 0x40) { memset(l->s, 0, sizeof l->s); l->ok = 1; }
+    if (!l->ok || ord < 1) { l->ok = 0; return; }
+    for (int k = 0; k < 13; k++) {
+        int pos = (ord - 1) * 13 + k;
+        u16 ch = (u16)(e[off[k]] | e[off[k] + 1] << 8);
+        if (ch == 0 || ch == 0xFFFF) break;
+        if (pos < 63) l->s[pos] = ch < 256 ? (char)ch : '_';
+    }
+}
+static int same_name(const char *a, const char *b, int blen) {
+    for (int i = 0; i < blen; i++) {
+        char x = a[i], y = b[i];
+        if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+        if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+        if (x != y || !x) return 0;
+    }
+    return a[blen] == 0;
+}
+
+/* Finds the name s[0..len) (8.3 or long) in directory `dir`.
+ * On success copies the entry and where it lives. */
 typedef struct { u32 cluster, index; } loc_t;
-static int dir_find(u32 dir, const char name83[11], dirent_t *out, loc_t *loc) {
+static int dir_find_name(u32 dir, const char *s, int len, dirent_t *out, loc_t *loc, char *lname) {
+    char n83[11];
+    int has83 = to83(s, len, n83) == 0;
+    lfn_t l = {{0}, 0};
     for (u32 c = dir; c >= 2 && c < EOC; c = fat_get(c)) {
         if (read_cluster(c) != 0) return -1;
         dirent_t *e = (dirent_t *)clbuf;
         for (u32 i = 0; i < clbytes / 32; i++) {
             if (e[i].name[0] == 0) return -1;
-            if ((u8)e[i].name[0] == 0xE5 || e[i].attr == ATTR_LFN || (e[i].attr & ATTR_VOLUME)) continue;
-            if (memcmp(e[i].name, name83, 11) == 0) {
+            if ((u8)e[i].name[0] == 0xE5) { l.ok = 0; continue; }
+            if (e[i].attr == ATTR_LFN) { lfn_add(&l, (const u8 *)&e[i]); continue; }
+            int longok = l.ok;
+            l.ok = 0;
+            if (e[i].attr & ATTR_VOLUME) continue;
+            if ((has83 && memcmp(e[i].name, n83, 11) == 0) || (longok && same_name(l.s, s, len))) {
                 if (out) *out = e[i];
                 if (loc) { loc->cluster = c; loc->index = i; }
+                if (lname) { if (longok) strncpy0(lname, l.s, 64); else from83(e[i].name, lname); }
                 return 0;
             }
         }
     }
     return -1;
 }
+static int dir_find(u32 dir, const char name83[11], dirent_t *out, loc_t *loc) {
+    char s[13];
+    from83(name83, s);
+    return dir_find_name(dir, s, (int)strlen(s), out, loc, NULL);
+}
 
-/* Walks "A/B/C": returns the cluster of the folder holding the last part and its 8.3 name. */
-static int walk(const char *path, u32 *parent, char last83[11]) {
+/* Walks "A/B/C": returns the folder holding the last part, and the last part itself. */
+static int walk_name(const char *path, u32 *parent, const char **last, int *lastlen) {
     u32 dir = root_cluster;
     const char *p = path;
     while (*p == '/') p++;
     for (;;) {
         const char *end = p;
         while (*end && *end != '/') end++;
-        char n83[11];
-        if (to83(p, (int)(end - p), n83) != 0) return -1;
-        if (!*end) { *parent = dir; memcpy(last83, n83, 11); return 0; }
+        if (end == p) return -1;
+        if (!*end || (end[0] == '/' && !end[1])) { *parent = dir; *last = p; *lastlen = (int)(end - p); return 0; }
         dirent_t e;
-        if (dir_find(dir, n83, &e, NULL) != 0 || !(e.attr & ATTR_DIR)) return -1;
+        if (dir_find_name(dir, p, (int)(end - p), &e, NULL, NULL) != 0 || !(e.attr & ATTR_DIR)) return -1;
         dir = ent_cluster(&e);
         if (dir == 0) dir = root_cluster;
         p = end + 1;
     }
+}
+/* Same, for creating: the last part must be a valid 8.3 name, or the existing
+ * entry's short name is used when a long name already exists. */
+static int walk(const char *path, u32 *parent, char last83[11]) {
+    const char *last;
+    int len;
+    if (walk_name(path, parent, &last, &len) != 0) return -1;
+    dirent_t e;
+    if (dir_find_name(*parent, last, len, &e, NULL, NULL) == 0) { memcpy(last83, e.name, 11); return 0; }
+    return to83(last, len, last83);
+}
+
+int fat_stat(const char *path, fat_entry_t *out) {
+    if (!fat_mounted) return -1;
+    if (!path[0] || (path[0] == '/' && !path[1])) { memset(out, 0, sizeof *out); out->is_dir = 1; return 0; }
+    u32 parent;
+    const char *last;
+    int len;
+    dirent_t e;
+    if (walk_name(path, &parent, &last, &len) != 0 || dir_find_name(parent, last, len, &e, NULL, out->lname) != 0) return -1;
+    from83(e.name, out->name);
+    out->size = e.size;
+    out->is_dir = (e.attr & ATTR_DIR) != 0;
+    return 0;
 }
 
 static int resolve_dir(const char *path, u32 *dir) {
@@ -232,14 +294,21 @@ int fat_list(const char *path, fat_entry_t *out, int max) {
     u32 dir;
     if (resolve_dir(path, &dir) != 0) return -1;
     int n = 0;
+    lfn_t l = {{0}, 0};
     for (u32 c = dir; c >= 2 && c < EOC; c = fat_get(c)) {
         if (read_cluster(c) != 0) return -1;
         dirent_t *e = (dirent_t *)clbuf;
         for (u32 i = 0; i < clbytes / 32; i++) {
             if (e[i].name[0] == 0) return n;
-            if ((u8)e[i].name[0] == 0xE5 || e[i].attr == ATTR_LFN || (e[i].attr & ATTR_VOLUME) || e[i].name[0] == '.') continue;
+            if ((u8)e[i].name[0] == 0xE5) { l.ok = 0; continue; }
+            if (e[i].attr == ATTR_LFN) { lfn_add(&l, (const u8 *)&e[i]); continue; }
+            int longok = l.ok;
+            l.ok = 0;
+            if ((e[i].attr & ATTR_VOLUME) || e[i].name[0] == '.') continue;
             if (n < max) {
                 from83(e[i].name, out[n].name);
+                if (longok) strncpy0(out[n].lname, l.s, 64);
+                else strncpy0(out[n].lname, out[n].name, 64);
                 out[n].size = e[i].size;
                 out[n].is_dir = (e[i].attr & ATTR_DIR) != 0;
             }

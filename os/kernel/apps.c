@@ -90,7 +90,7 @@ int app_install(const char *id) {
 void apps_load_from_disk(void) {
     if (!fat_mounted) return;
     if (fat_mkdir("CHAMOWS") != 0 || fat_mkdir(APPS_DIR) != 0) { klog("apps: no se pudo crear %s en el pendrive\n", APPS_DIR); return; }
-    fat_entry_t list[32];
+    static fat_entry_t list[32];
     int n = fat_list(APPS_DIR, list, 32);
     for (int i = 0; i < n && i < 32; i++) {
         char id[13];

@@ -64,6 +64,7 @@ typedef struct w32proc {
     u16 wcmdline[256];
     char *argv[17];
     int argc;
+    char cwd[160];          /* current directory on the pendrive, "" = root */
     const icon_t *icon;
     u8 *raw, *image;
     u64 entry;
@@ -1424,6 +1425,8 @@ __attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
         "mov 8(%rcx), %rsp\n jmp *72(%rcx)\n");
 }
 
+#include "wfiles.inc"
+
 static const struct { const char *name; void *fn; } exports2[] = {
     {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
     {"ExitThread", k_ExitThread}, {"GetCurrentThread", k_GetCurrentThread}, {"GetCurrentThreadId", k_GetCurrentThreadId},
@@ -1535,7 +1538,9 @@ static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
                 if (!(t >> 63)) {
                     const char *name = (const char *)img + (u32)t + 2;
                     int found = 0;
-                    for (u32 j = 0; j < sizeof exports / sizeof exports[0]; j++)
+                    for (u32 j = 0; j < sizeof exports_files / sizeof exports_files[0]; j++)
+                        if (strcmp(exports_files[j].name, name) == 0) { fn = exports_files[j].fn; found = 1; break; }
+                    for (u32 j = 0; !found && j < sizeof exports / sizeof exports[0]; j++)
                         if (strcmp(exports[j].name, name) == 0) { fn = exports[j].fn; found = 1; break; }
                     for (u32 j = 0; !found && j < sizeof exports2 / sizeof exports2[0]; j++)
                         if (strcmp(exports2[j].name, name) == 0) { fn = exports2[j].fn; found = 1; }
@@ -1611,10 +1616,13 @@ static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64
 }
 
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) { return pe_run_args(data, size, name, icon, ""); }
+char pe_dir[160];
 int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args) {
     w32proc_t *p = kzalloc(sizeof *p);
     if (!p) return -1;
     strncpy0(p->name, name, sizeof p->name);
+    strncpy0(p->cwd, pe_dir, sizeof p->cwd);
+    pe_dir[0] = 0;
     ksnprintf(p->cmdline, sizeof p->cmdline, *args ? "%s %s" : "%s", name, args);
     for (int i = 0; i < 255 && p->cmdline[i]; i++) p->wcmdline[i] = (u8)p->cmdline[i];
     /* argv: split on spaces (no quotes yet), in a copy */
@@ -1725,6 +1733,7 @@ void win32_poll(void) {
 }
 
 #else /* 32-bit build: Windows programs need the 64-bit Chamows */
+char pe_dir[160];
 int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args) { return pe_run(data, size, name, icon); }
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) {
     notify(icon, "No se pudo abrir el programa", "Los .exe solo funcionan en Chamows de 64 bits.");

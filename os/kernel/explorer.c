@@ -149,7 +149,7 @@ static void ex_draw(void) {
         if (i == selected) fill_round(s, x0 - 6, y, w->w - x0 - 10, ROW_H - 2, 5, 0xFFDCE6F8);
         const icon_t *ic = &ICON_APP;
         char label[48];
-        strncpy0(label, e->name, sizeof label);
+        strncpy0(label, view == VIEW_DISK && e->lname[0] ? e->lname : e->name, sizeof label);
         const char *kind = kind_of(e);
         if (view == VIEW_APPS) {
             installed_app_t *a = installed_find(e->name);
@@ -274,6 +274,7 @@ static void open_item(int i) {
         u8 *data;
         u32 size;
         if (fat_read(path, &data, &size) != 0) { notify(&ICON_FOLDER, "No se pudo leer el archivo", e->name); return; }
+        strncpy0(pe_dir, cwd, sizeof pe_dir);
         pe_run(data, size, e->name, &ICON_APP);
         kfree(data);
     } else if (has_ext(e->name, ".TXT") || has_ext(e->name, ".INI") || has_ext(e->name, ".MD") || has_ext(e->name, ".LOG")) {
