@@ -168,3 +168,10 @@ de Windows, hilos, red cifrada, OpenGL). El mini Win32 de Chamows no puede
 ejecutarlo, y tampoco Telegram Web, que necesita un navegador con JavaScript
 completo. Lo que sí se puede hacer cuando haya red: descargar e instalar .exe
 pequeños desde internet, y una app propia de mensajes.
+
+## 21. ScummVM original (scummvm.exe de Windows)
+- **Elegido:** ejecutar el scummvm.exe oficial de 64 bits (con SDL2 dentro) ampliando el mini Win32, sin sonido. Lo pidió Nacho en la tarjeta de decisión.
+- **Rechazado:** portar ScummVM como app nativa de Chamows (más rápido de lograr, pero no es "abrir el .exe").
+- **Hilos:** hilos cooperativos (fibras) por proceso, cada uno con su pila y su TEB falso vía GS_BASE. CreateThread, eventos, mutex, semáforos y esperas cambian de hilo cuando nadie puede avanzar. Rechazado: hilos con desalojo real, porque el núcleo no tiene planificador preemptivo y sería un cambio muy grande.
+- **free() seguro:** el montón marca cada bloque con un número mágico; un free() de un puntero ajeno se registra y se ignora en vez de colgar el sistema.
+- **Estado:** fase 1 hecha. Las 686 funciones que importa se resuelven o se sustituyen, arranca su main y SDL llega a iniciarse; termina con "Could not initialize SDL: No displays available!" porque faltan las funciones de pantalla (EnumDisplayMonitors, GetMonitorInfoW, EnumDisplaySettingsW…). Fases siguientes: archivos (fase 2) y ventana/gráficos de SDL (fase 3).

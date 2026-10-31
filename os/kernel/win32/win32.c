@@ -43,18 +43,33 @@ typedef struct w32win {
 typedef struct { char name[64]; WNDPROC proc; u32 bg; } wclass_t;
 typedef struct blk { struct blk *next, *prev; u64 size, pad; } blk_t;
 
+typedef struct w32thread {
+    struct w32proc *p;
+    uptr rsp;
+    u8 *stack, *teb, *tls;
+    int wait;            /* W_RUN, W_MSG, W_SLEEP, W_BOX */
+    u32 wake_at, id, exit_code;
+    int done;
+    u64 start, param;
+    u64 tls_slots[64];
+    struct w32thread *next;
+} w32thread_t;
+
 #define QMAX 128
 #define CON_COLS 80
 #define CON_ROWS 24
 typedef struct w32proc {
     char name[40];
+    char cmdline[256];
+    u16 wcmdline[256];
+    char *argv[17];
+    int argc;
     const icon_t *icon;
     u8 *raw, *image;
     u64 entry;
-    u8 *stack, *teb, *peb, *tls;
-    uptr rsp;
-    int wait;            /* W_RUN, W_MSG, W_SLEEP, W_BOX */
-    u32 wake_at;
+    u8 *peb, *tls_template;
+    u64 tls_len;
+    w32thread_t *threads;
     int done, killed, cleaned, quit, exit_code;
     MSG q[QMAX];
     int qhead, qcount;
@@ -74,6 +89,10 @@ typedef struct w32proc {
 enum { W_RUN, W_MSG, W_SLEEP, W_BOX };
 
 static w32proc_t *procs, *cur;
+static w32thread_t *cur_th;
+static void thread_main(void);
+static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64 param, u32 stack_size);
+static u32 next_tid = 8;
 static uptr kernel_rsp;
 
 /* ---------- switching stacks ---------- */
@@ -90,8 +109,8 @@ static void flush_windows(w32proc_t *p) {
         if (w->touched && w->cw) { w->touched = 0; win_invalidate(w->cw); }
 }
 static void yield(int wait) {
-    cur->wait = wait;
-    ctx_switch(&cur->rsp, kernel_rsp);
+    cur_th->wait = wait;
+    ctx_switch(&cur_th->rsp, kernel_rsp);
 }
 static void proc_exit(int code) {
     cur->exit_code = code;
@@ -105,6 +124,7 @@ static void *p_alloc(u64 n, int zero) {
     blk_t *b = kmalloc(sizeof *b + n);
     if (!b) return NULL;
     b->size = n;
+    b->pad = 0xB10CB10C;
     b->prev = NULL;
     b->next = cur->blocks;
     if (b->next) b->next->prev = b;
@@ -115,6 +135,8 @@ static void *p_alloc(u64 n, int zero) {
 static void p_free(void *ptr) {
     if (!ptr) return;
     blk_t *b = (blk_t *)ptr - 1;
+    if (((uptr)ptr & 15) || b->pad != 0xB10CB10C) { klog("exe: free() de un puntero desconocido %x\n", (u32)(uptr)ptr); return; }
+    b->pad = 0;
     if (b->prev) b->prev->next = b->next; else cur->blocks = b->next;
     if (b->next) b->next->prev = b->prev;
     kfree(b);
@@ -408,7 +430,8 @@ static void fill_ellipse(surface_t *s, int l, int t, int r, int b, u32 c) {
 /* kernel32 */
 static WINAPI void k_ExitProcess(u32 code) { proc_exit((int)code); }
 static WINAPI void *k_GetModuleHandleA(const char *n) { return n ? NULL : cur->image; }
-static WINAPI const char *k_GetCommandLineA(void) { return cur->name; }
+static WINAPI const char *k_GetCommandLineA(void) { return cur->cmdline; }
+static WINAPI const u16 *k_GetCommandLineW(void) { return cur->wcmdline; }
 static WINAPI void k_GetStartupInfoA(u8 *si) { memset(si, 0, 104); *(u32 *)si = 104; }
 static WINAPI u64 k_GetStdHandle(u32 n) { return 0x10 + (u64)(-(i32)n - 10); }
 static WINAPI int k_WriteFile(u64 h, const char *buf, u32 n, u32 *written, void *ov) {
@@ -423,7 +446,7 @@ static WINAPI int k_QPC(i64 *v) { *v = (i64)ticks_ms * 1000; return 1; }
 static WINAPI int k_QPF(i64 *v) { *v = 1000000; return 1; }
 static WINAPI void k_Sleep(u32 ms) {
     flush_windows(cur);
-    cur->wake_at = ticks_ms + ms;
+    cur_th->wake_at = ticks_ms + ms;
     yield(W_SLEEP);
 }
 static WINAPI u32 k_SleepEx(u32 ms, int a) { k_Sleep(ms); return 0; }
@@ -462,11 +485,10 @@ static WINAPI void k_GetLocalTime(u16 *st) {
     memcpy(st, v, sizeof v);
 }
 static WINAPI void k_OutputDebugStringA(const char *s) { klog("exe: %s\n", s); }
-static u64 tls_slots[64];
 static int tls_next;
 static WINAPI u32 k_TlsAlloc(void) { return tls_next < 64 ? (u32)tls_next++ : 0xFFFFFFFF; }
-static WINAPI u64 k_TlsGetValue(u32 i) { return i < 64 ? tls_slots[i] : 0; }
-static WINAPI int k_TlsSetValue(u32 i, u64 v) { if (i < 64) tls_slots[i] = v; return 1; }
+static WINAPI u64 k_TlsGetValue(u32 i) { return i < 64 ? cur_th->tls_slots[i] : 0; }
+static WINAPI int k_TlsSetValue(u32 i, u64 v) { if (i < 64) cur_th->tls_slots[i] = v; return 1; }
 static WINAPI int k_lstrlenA(const char *s) { return s ? (int)strlen(s) : 0; }
 
 /* user32 */
@@ -884,14 +906,12 @@ static FILE_ iob[3];
 static int fmode, commode, errno_;
 static VOIDFN atexit_fns[32];
 static int n_atexit;
-static char *argv0[2];
 static char *envp0[1];
 static int out_file(void *f) { return f == &iob[1] || f == &iob[2]; }
 static WINAPI void *c___iob_func(void) { return iob; }
 static WINAPI void *c___acrt_iob_func(u32 i) { return &iob[i < 3 ? i : 1]; }
 static WINAPI int c___getmainargs(int *argc, char ***argv, char ***env, int glob, void *si) {
-    argv0[0] = cur->name;
-    *argc = 1; *argv = argv0; *env = envp0;
+    *argc = cur->argc; *argv = cur->argv; *env = envp0;
     return 0;
 }
 static WINAPI int *c___p__fmode(void) { return &fmode; }
@@ -1014,6 +1034,8 @@ static WINAPI void *c_localeconv(void) { return &lconv_; }
 static WINAPI const char *c_strerror(int e) { return "error"; }
 static WINAPI u64 c_wcslen(const u16 *s) { u64 n = 0; while (s[n]) n++; return n; }
 static char *acmdln = "programa.exe";
+static int argc_var;
+static char **argv_var;
 
 static WINAPI u64 unknown_import(void) { return 0; }
 
@@ -1079,7 +1101,379 @@ static const struct { const char *name; void *fn; } exports[] = {
     {"_ismbblead", k_zero}, {"IsDBCSLeadByteEx", k_zero}, {"MultiByteToWideChar", k_zero}, {"WideCharToMultiByte", k_zero},
     {"localeconv", c_localeconv}, {"strerror", c_strerror}, {"wcslen", c_wcslen}, {"__C_specific_handler", k_zero},
     /* variables (the program reads them through the import table) */
+    {"__argc", &argc_var}, {"__argv", &argv_var}, {"GetCommandLineW", k_GetCommandLineW},
     {"_fmode", &fmode}, {"_commode", &commode}, {"__initenv", &envp0}, {"_acmdln", &acmdln},
+};
+
+/* ---------- more of Windows: threads, waits, strings, numbers ---------- */
+enum { H_EVENT = 1, H_MUTEX, H_SEM, H_THREAD };
+typedef struct { u32 magic; int kind, signaled, manual, count, max; w32thread_t *th; } hobj_t;
+#define HMAGIC 0x484F424A
+static hobj_t *hnew(int kind) { hobj_t *h = p_alloc(sizeof *h, 1); h->magic = HMAGIC; h->kind = kind; return h; }
+static hobj_t *H(u64 v) { hobj_t *h = (hobj_t *)v; return v > 0x10000 && !(v & 7) && h->magic == HMAGIC ? h : NULL; }
+
+static WINAPI u64 k_CreateThread(void *sa, u64 stack, u64 start, u64 param, u32 flags, u32 *tid) {
+    w32thread_t *t = thread_new(cur, thread_main, start, param, stack > 256 * 1024 ? (u32)stack : 512 * 1024);
+    if (!t) return 0;
+    hobj_t *h = hnew(H_THREAD);
+    h->th = t;
+    if (tid) *tid = t->id;
+    return (u64)h;
+}
+static WINAPI u64 c__beginthreadex(void *sa, u32 stack, u64 start, u64 param, u32 flags, u32 *tid) { return k_CreateThread(sa, stack, start, param, flags, tid); }
+static WINAPI void k_ExitThread(u32 code) { cur_th->exit_code = code; cur_th->done = 1; yield(W_RUN); for (;;) {} }
+static WINAPI u64 k_GetCurrentThread(void) { return (u64)-2; }
+static WINAPI u32 k_GetCurrentThreadId(void) { return cur_th ? cur_th->id : 8; }
+static WINAPI u64 k_CreateEventA(void *sa, int manual, int initial, const void *name) {
+    hobj_t *h = hnew(H_EVENT);
+    h->manual = manual;
+    h->signaled = initial;
+    return (u64)h;
+}
+static WINAPI int k_SetEvent(u64 v) { hobj_t *h = H(v); if (h) h->signaled = 1; return 1; }
+static WINAPI int k_ResetEvent(u64 v) { hobj_t *h = H(v); if (h) h->signaled = 0; return 1; }
+static WINAPI u64 k_CreateMutexA(void *sa, int owned, const void *name) {
+    hobj_t *h = hnew(H_MUTEX);
+    if (owned) { h->th = cur_th; h->count = 1; }
+    return (u64)h;
+}
+static WINAPI int k_ReleaseMutex(u64 v) { hobj_t *h = H(v); if (h && h->th == cur_th && --h->count <= 0) { h->count = 0; h->th = NULL; } return 1; }
+static WINAPI u64 k_CreateSemaphoreA(void *sa, int initial, int max, const void *name) {
+    hobj_t *h = hnew(H_SEM);
+    h->count = initial;
+    h->max = max;
+    return (u64)h;
+}
+static WINAPI int k_ReleaseSemaphore(u64 v, int n, int *prev) {
+    hobj_t *h = H(v);
+    if (!h) return 0;
+    if (prev) *prev = h->count;
+    h->count += n;
+    if (h->max && h->count > h->max) h->count = h->max;
+    return 1;
+}
+static int try_take(u64 v) {
+    hobj_t *h = H(v);
+    if (!h) return 0;
+    switch (h->kind) {
+    case H_EVENT: if (!h->signaled) return 0; if (!h->manual) h->signaled = 0; return 1;
+    case H_MUTEX: if (h->th && h->th != cur_th) return 0; h->th = cur_th; h->count++; return 1;
+    case H_SEM: if (h->count <= 0) return 0; h->count--; return 1;
+    case H_THREAD: return h->th && h->th->done;
+    }
+    return 0;
+}
+static WINAPI u32 k_WaitForMultipleObjects(u32 n, const u64 *hs, int all, u32 ms) {
+    u32 start = ticks_ms;
+    for (;;) {
+        if (all) {
+            int ok = 1;
+            for (u32 i = 0; i < n; i++) { hobj_t *h = H(hs[i]); if (h && h->kind != H_THREAD && !(h->kind == H_EVENT ? h->signaled : h->kind == H_SEM ? h->count > 0 : !h->th || h->th == cur_th)) ok = 0; if (h && h->kind == H_THREAD && !h->th->done) ok = 0; }
+            if (ok) { for (u32 i = 0; i < n; i++) try_take(hs[i]); return 0; }
+        } else {
+            for (u32 i = 0; i < n; i++) if (try_take(hs[i])) return i;
+        }
+        if (ms == 0 || (ms != 0xFFFFFFFF && ticks_ms - start >= ms)) return 0x102;
+        flush_windows(cur);
+        yield(W_RUN);
+    }
+}
+static WINAPI u32 k_WaitForSingleObject(u64 h, u32 ms) { return k_WaitForMultipleObjects(1, &h, 0, ms); }
+static WINAPI u32 k_WaitForSingleObjectEx(u64 h, u32 ms, int a) { return k_WaitForMultipleObjects(1, &h, 0, ms); }
+static WINAPI int k_SleepConditionVariableCS(u64 *cv, void *cs, u32 ms) {
+    u64 seen = *cv;
+    u32 start = ticks_ms;
+    while (*cv == seen) {
+        if (ms != 0xFFFFFFFF && ticks_ms - start >= ms) { last_error = 1460; return 0; }
+        yield(W_RUN);
+    }
+    return 1;
+}
+static WINAPI void k_WakeConditionVariable(u64 *cv) { (*cv)++; }
+static WINAPI void k_GetSystemInfo(u8 *si) {
+    memset(si, 0, 48);
+    *(u16 *)si = 9;                       /* x64 */
+    *(u32 *)(si + 4) = 4096;              /* page size */
+    *(u64 *)(si + 8) = 0x10000;
+    *(u64 *)(si + 16) = 0x7FFFFFFEFFFF;
+    *(u64 *)(si + 24) = 1;                /* active processor mask */
+    *(u32 *)(si + 32) = 1;                /* processors */
+    *(u32 *)(si + 36) = 8664;
+    *(u32 *)(si + 40) = 65536;
+}
+static WINAPI int k_GlobalMemoryStatusEx(u8 *m) {
+    u64 total = (u64)total_memory_kb * 1024, avail = total - heap_used();
+    *(u32 *)(m + 4) = 50;
+    for (int i = 0; i < 6; i++) *(u64 *)(m + 8 + i * 8) = i % 2 ? avail : total;
+    return 1;
+}
+static WINAPI int k_GetVersionExA(u8 *v) { *(u32 *)(v + 4) = 10; *(u32 *)(v + 8) = 0; *(u32 *)(v + 12) = 19045; *(u32 *)(v + 16) = 2; return 1; }
+static WINAPI int k_IsProcessorFeaturePresent(u32 f) { return f == 6 || f == 10 || f == 3; }
+static WINAPI u32 k_GetModuleFileNameA(void *m, char *out, u32 n) { ksnprintf(out, n, "C:\\%s", cur->name); return (u32)strlen(out); }
+static WINAPI u32 k_GetModuleFileNameW(void *m, u16 *out, u32 n) {
+    char a[64]; ksnprintf(a, sizeof a, "C:\\%s", cur->name);
+    u32 i = 0; for (; a[i] && i + 1 < n; i++) out[i] = (u8)a[i];
+    out[i] = 0; return i;
+}
+static WINAPI int k_GetModuleHandleExW(u32 f, const void *n, void **out) { *out = cur->image; return 1; }
+static WINAPI int k_lstrlenW(const u16 *s) { int n = 0; while (s && s[n]) n++; return n; }
+static WINAPI int k_MulDiv(int a, int b, int c) { return c ? (int)((i64)a * b / c) : -1; }
+static WINAPI void k_OutputDebugStringW(const u16 *s) { char b[200]; int i = 0; for (; s[i] && i < 199; i++) b[i] = (char)s[i]; b[i] = 0; klog("exe: %s\n", b); }
+static WINAPI int k_WriteConsoleW(u64 h, const u16 *buf, u32 n, u32 *w, void *r) {
+    char tmp[256];
+    for (u32 i = 0; i < n;) { u32 k = 0; for (; k < 255 && i < n; k++, i++) tmp[k] = buf[i] < 256 ? (char)buf[i] : '?'; con_write(tmp, (int)k); }
+    if (w) *w = n;
+    return 1;
+}
+static WINAPI u32 k_GetFileType(u64 h) { return h >= 0x10 && h <= 0x12 ? 2 : 1; }
+static WINAPI void *k_GlobalAlloc(u32 f, u64 n) { return p_alloc(n ? n : 1, 1); }
+static WINAPI void *k_GlobalLock(void *p) { return p; }
+static WINAPI void *k_GlobalFree(void *p) { p_free(p); return NULL; }
+static WINAPI void k_RaiseException(u32 code, u32 f, u32 n, const u64 *args) {
+    klog("exe: excepción de Windows %x sin manejar; el programa se cierra\n", code);
+    proc_exit(255);
+}
+
+/* msvcrt: memory, strings and characters */
+static WINAPI char *c__strdup(const char *s) { u64 n = strlen(s) + 1; char *d = p_alloc(n, 0); if (d) memcpy(d, s, n); return d; }
+static WINAPI int c__stricmp(const char *a, const char *b) { return stricmp_(a, b); }
+static WINAPI int c__strnicmp(const char *a, const char *b, u64 n) {
+    for (; n; n--, a++, b++) { int d = lower((u8)*a) - lower((u8)*b); if (d || !*a) return d; }
+    return 0;
+}
+static WINAPI char *c__strlwr(char *s) { for (char *p = s; *p; p++) *p = (char)lower(*p); return s; }
+static WINAPI char *c__strupr(char *s) { for (char *p = s; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32; return s; }
+static WINAPI char *c__strrev(char *s) { u64 n = strlen(s); for (u64 i = 0; i < n / 2; i++) { char t = s[i]; s[i] = s[n - 1 - i]; s[n - 1 - i] = t; } return s; }
+static WINAPI void *c_memchr(const void *p, int c, u64 n) { const u8 *s = p; for (u64 i = 0; i < n; i++) if (s[i] == (u8)c) return (void *)(s + i); return NULL; }
+static WINAPI char *c_strstr(const char *h, const char *n) {
+    u64 k = strlen(n);
+    for (; *h; h++) if (c_strncmp(h, n, k) == 0) return (char *)h;
+    return k ? NULL : (char *)h;
+}
+static WINAPI u64 c_strspn(const char *s, const char *a) { u64 n = 0; while (s[n] && c_strchr(a, s[n])) n++; return n; }
+static WINAPI u64 c_strcspn(const char *s, const char *a) { u64 n = 0; while (s[n] && !c_strchr(a, s[n])) n++; return n; }
+static WINAPI char *c_strpbrk(const char *s, const char *a) { for (; *s; s++) if (c_strchr(a, *s)) return (char *)s; return NULL; }
+static WINAPI char *c_strncat(char *d, const char *s, u64 n) { char *e = d + strlen(d); u64 i = 0; for (; i < n && s[i]; i++) e[i] = s[i]; e[i] = 0; return d; }
+static WINAPI int c_strncpy_s(char *d, u64 dn, const char *s, u64 n) { u64 i = 0; for (; i < n && s[i] && i + 1 < dn; i++) d[i] = s[i]; if (dn) d[i] = 0; return 0; }
+static char *tok_next;
+static WINAPI char *c_strtok(char *s, const char *d) {
+    if (!s) s = tok_next;
+    if (!s) return NULL;
+    s += c_strspn(s, d);
+    if (!*s) { tok_next = NULL; return NULL; }
+    char *e = s + c_strcspn(s, d);
+    if (*e) { *e = 0; tok_next = e + 1; } else tok_next = NULL;
+    return s;
+}
+static WINAPI u64 c_strxfrm(char *d, const char *s, u64 n) { u64 k = strlen(s); if (n) c_strncpy_s(d, n, s, k); return k; }
+static WINAPI int c_isdigit(int c) { return c >= '0' && c <= '9'; }
+static WINAPI int c_isalpha(int c) { return (c | 32) >= 'a' && (c | 32) <= 'z'; }
+static WINAPI int c_isalnum(int c) { return c_isdigit(c) || c_isalpha(c); }
+static WINAPI int c_isspace(int c) { return c == ' ' || (c >= 9 && c <= 13); }
+static WINAPI int c_isupper(int c) { return c >= 'A' && c <= 'Z'; }
+static WINAPI int c_islower(int c) { return c >= 'a' && c <= 'z'; }
+static WINAPI int c_isxdigit(int c) { return c_isdigit(c) || ((c | 32) >= 'a' && (c | 32) <= 'f'); }
+static WINAPI int c_iscntrl(int c) { return (c >= 0 && c < 32) || c == 127; }
+static WINAPI int c_isgraph(int c) { return c > 32 && c < 127; }
+static WINAPI int c_ispunct(int c) { return c_isgraph(c) && !c_isalnum(c); }
+static WINAPI int c_tolower(int c) { return c_isupper(c) ? c + 32 : c; }
+static WINAPI int c_toupper(int c) { return c_islower(c) ? c - 32 : c; }
+static WINAPI u64 c_strtoui64(const char *s, char **end, int base) {
+    while (c_isspace(*s)) s++;
+    int neg = 0;
+    if (*s == '-' || *s == '+') neg = *s++ == '-';
+    if ((base == 0 || base == 16) && s[0] == '0' && (s[1] | 32) == 'x') { s += 2; base = 16; }
+    else if (base == 0) base = s[0] == '0' ? 8 : 10;
+    u64 v = 0;
+    for (;; s++) {
+        int d = c_isdigit(*s) ? *s - '0' : c_isalpha(*s) ? (*s | 32) - 'a' + 10 : 99;
+        if (d >= base) break;
+        v = v * (u64)base + (u64)d;
+    }
+    if (end) *end = (char *)s;
+    return neg ? (u64)-(i64)v : v;
+}
+static WINAPI i64 c_strtoi64(const char *s, char **e, int b) { return (i64)c_strtoui64(s, e, b); }
+static WINAPI i32 c_strtol(const char *s, char **e, int b) { return (i32)c_strtoui64(s, e, b); }
+static WINAPI u32 c_strtoul(const char *s, char **e, int b) { return (u32)c_strtoui64(s, e, b); }
+static WINAPI i32 c_atol(const char *s) { return (i32)c_strtoui64(s, NULL, 10); }
+static WINAPI double c_atof(const char *s) {
+    char *e;
+    double v = (double)c_strtoi64(s, &e, 10), f = 0.1;
+    if (*e == '.') for (e++; c_isdigit(*e); e++, f /= 10) v += (v < 0 || *s == '-' ? -1 : 1) * (*e - '0') * f;
+    return v;
+}
+static char *utoa_(u64 v, char *out, int base, int neg) {
+    char tmp[72]; int n = 0;
+    do { tmp[n++] = "0123456789abcdefghijklmnopqrstuvwxyz"[v % (u64)base]; v /= (u64)base; } while (v);
+    char *o = out;
+    if (neg) *o++ = '-';
+    while (n) *o++ = tmp[--n];
+    *o = 0;
+    return out;
+}
+static WINAPI char *c__itoa(int v, char *o, int b) { return utoa_(v < 0 && b == 10 ? (u64)-(i64)v : (u32)v, o, b, v < 0 && b == 10); }
+static WINAPI char *c__ultoa(u32 v, char *o, int b) { return utoa_(v, o, b, 0); }
+static WINAPI char *c__i64toa(i64 v, char *o, int b) { return utoa_(v < 0 && b == 10 ? (u64)-v : (u64)v, o, b, v < 0 && b == 10); }
+static WINAPI char *c__ui64toa(u64 v, char *o, int b) { return utoa_(v, o, b, 0); }
+static WINAPI int c__vscprintf(const char *f, __builtin_ms_va_list ap) { char tmp[4]; return vfmt(tmp, 1, f, ap); }
+static WINAPI u64 c_div(int a, int b) { int q = b ? a / b : 0, r = b ? a % b : 0; return (u32)q | (u64)(u32)r << 32; }
+static WINAPI void c_qsort(void *base, u64 n, u64 sz, int (WINAPI *cmp)(const void *, const void *)) {
+    u8 *b = base, tmp[256];
+    if (sz > sizeof tmp) return;
+    for (u64 i = 1; i < n; i++) /* insertion sort: small and stable enough */
+        for (u64 j = i; j > 0 && cmp(b + (j - 1) * sz, b + j * sz) > 0; j--) {
+            memcpy(tmp, b + j * sz, sz); memcpy(b + j * sz, b + (j - 1) * sz, sz); memcpy(b + (j - 1) * sz, tmp, sz);
+        }
+}
+static WINAPI void *c_bsearch(const void *key, const void *base, u64 n, u64 sz, int (WINAPI *cmp)(const void *, const void *)) {
+    u64 lo = 0, hi = n;
+    while (lo < hi) {
+        u64 mid = (lo + hi) / 2;
+        int r = cmp(key, (const u8 *)base + mid * sz);
+        if (!r) return (void *)((const u8 *)base + mid * sz);
+        if (r < 0) hi = mid; else lo = mid + 1;
+    }
+    return NULL;
+}
+static WINAPI void c__assert(const char *m, const char *f, u32 line) { klog("exe: assert falló: %s (%s:%u)\n", m, f, line); proc_exit(3); }
+static WINAPI char *c_setlocale(int c, const char *l) { return "C"; }
+static WINAPI char *c_getenv(const char *n) { return NULL; }
+static WINAPI int c__write(int fd, const void *b, u32 n) { if (fd == 1 || fd == 2) con_write(b, (int)n); return (int)n; }
+static WINAPI int c__fileno(void *f) { return f == &iob[0] ? 0 : f == &iob[1] ? 1 : f == &iob[2] ? 2 : -1; }
+static WINAPI int c_minus1(void) { return -1; }
+static WINAPI void *c_null(void) { return NULL; }
+static WINAPI int c_fputwc(u16 c, void *f) { char ch = c < 256 ? (char)c : '?'; if (out_file(f)) con_write(&ch, 1); return c; }
+static WINAPI int c_fputws(const u16 *s, void *f) { while (*s) c_fputwc(*s++, f); return 0; }
+static WINAPI char *c__fullpath(char *out, const char *p, u64 n) { if (!out) out = p_alloc(260, 1); strncpy0(out, p, n ? n : 260); return out; }
+/* wide strings */
+static WINAPI u64 c_wcscmp(const u16 *a, const u16 *b) { while (*a && *a == *b) { a++; b++; } return (u64)(i64)(*a - *b); }
+static WINAPI int c_wcsncmp(const u16 *a, const u16 *b, u64 n) { for (; n; n--, a++, b++) { if (*a != *b) return *a - *b; if (!*a) break; } return 0; }
+static WINAPI u16 *c_wcscpy(u16 *d, const u16 *s) { u16 *r = d; while ((*d++ = *s++)) {} return r; }
+static WINAPI u16 *c_wcscat(u16 *d, const u16 *s) { c_wcscpy(d + c_wcslen(d), s); return d; }
+static WINAPI int c_wcscpy_s(u16 *d, u64 n, const u16 *s) { u64 i = 0; for (; s[i] && i + 1 < n; i++) d[i] = s[i]; if (n) d[i] = 0; return 0; }
+static WINAPI int c_wcsncpy_s(u16 *d, u64 n, const u16 *s, u64 k) { u64 i = 0; for (; i < k && s[i] && i + 1 < n; i++) d[i] = s[i]; if (n) d[i] = 0; return 0; }
+static WINAPI u16 *c_wcsrchr(const u16 *s, u16 c) { const u16 *r = NULL; for (;; s++) { if (*s == c) r = s; if (!*s) return (u16 *)r; } }
+static WINAPI u16 *c_wcsstr(const u16 *h, const u16 *n) { u64 k = c_wcslen(n); for (; *h; h++) if (!c_wcsncmp(h, n, k)) return (u16 *)h; return k ? NULL : (u16 *)h; }
+static WINAPI int c__wcsicmp(const u16 *a, const u16 *b) { while (*a && lower(*a) == lower(*b)) { a++; b++; } return lower(*a) - lower(*b); }
+static WINAPI int c__wcsnicmp(const u16 *a, const u16 *b, u64 n) { for (; n; n--, a++, b++) { int d = lower(*a) - lower(*b); if (d || !*a) return d; } return 0; }
+static WINAPI u16 c_towlower(u16 c) { return (u16)lower(c); }
+static WINAPI u16 c_towupper(u16 c) { return c >= 'a' && c <= 'z' ? c - 32 : c; }
+static WINAPI i32 c_wcstol(const u16 *s, u16 **e, int b) { char a[64]; int i = 0; for (; s[i] && i < 63; i++) a[i] = (char)s[i]; a[i] = 0; char *ae; i32 v = (i32)c_strtoui64(a, &ae, b); if (e) *e = (u16 *)(s + (ae - a)); return v; }
+static WINAPI u64 c_mbstowcs(u16 *d, const char *s, u64 n) { u64 i = 0; for (; s[i] && (!d || i < n); i++) if (d) d[i] = (u8)s[i]; if (d && i < n) d[i] = 0; return i; }
+static WINAPI u64 c_wcstombs(char *d, const u16 *s, u64 n) { u64 i = 0; for (; s[i] && (!d || i < n); i++) if (d) d[i] = s[i] < 256 ? (char)s[i] : '?'; if (d && i < n) d[i] = 0; return i; }
+static WINAPI int c_mbstowcs_s(u64 *r, u16 *d, u64 dn, const char *s, u64 n) { u64 k = c_mbstowcs(d, s, dn ? dn - 1 : 0); if (d && dn) d[imin((int)k, (int)dn - 1)] = 0; if (r) *r = k + 1; return 0; }
+static WINAPI int c_wcstombs_s(u64 *r, char *d, u64 dn, const u16 *s, u64 n) { u64 k = c_wcstombs(d, s, dn ? dn - 1 : 0); if (d && dn) d[imin((int)k, (int)dn - 1)] = 0; if (r) *r = k + 1; return 0; }
+/* math with the x87 unit */
+static WINAPI double c_atan2_(double y, double x) { double r; __asm__("fpatan" : "=t"(r) : "0"(x), "u"(y) : "st(1)"); return r; }
+static WINAPI double c_atan(double x) { return c_atan2_(x, 1.0); }
+static WINAPI double c_asin(double x) { return c_atan2_(x, c_sqrt(1 - x * x)); }
+static WINAPI double c_acos(double x) { return c_atan2_(c_sqrt(1 - x * x), x); }
+static WINAPI double c_tan(double x) { double r; __asm__("fptan; fstp %%st(0)" : "=t"(r) : "0"(x)); return r; }
+static WINAPI double c_log10(double x) { double r; __asm__("fldlg2; fxch; fyl2x" : "=t"(r) : "0"(x)); return r; }
+static double exp_(double x) {
+    double r;
+    __asm__("fldl2e; fmulp; fld %%st(0); frndint; fsub %%st, %%st(1); fxch; f2xm1; fld1; faddp; fscale; fstp %%st(1)" : "=t"(r) : "0"(x));
+    return r;
+}
+static WINAPI double c_sinh(double x) { return (exp_(x) - exp_(-x)) / 2; }
+static WINAPI double c_cosh(double x) { return (exp_(x) + exp_(-x)) / 2; }
+static WINAPI double c_tanh(double x) { double a = exp_(x), b = exp_(-x); return (a - b) / (a + b); }
+/* time */
+static struct { int sec, min, hour, mday, mon, year, wday, yday, isdst; } tm_;
+static WINAPI void *c__gmtime64(const i64 *t) {
+    i64 v = *t, days = v / 86400, rem = v % 86400;
+    tm_.hour = (int)(rem / 3600); tm_.min = (int)(rem / 60 % 60); tm_.sec = (int)(rem % 60);
+    tm_.wday = (int)((days + 4) % 7);
+    int y = 1970;
+    for (;;) { int yd = 365 + (y % 4 == 0); if (days < yd) break; days -= yd; y++; }
+    tm_.year = y - 1900; tm_.yday = (int)days;
+    static const int md[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int m = 0;
+    for (; m < 11; m++) { int d = md[m] + (m == 1 && y % 4 == 0); if (days < d) break; days -= d; }
+    tm_.mon = m; tm_.mday = (int)days + 1; tm_.isdst = 0;
+    return &tm_;
+}
+static WINAPI i64 c__mktime64(void *tmv) {
+    int *t = tmv;
+    static const int cum[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+    int y = t[5] + 1900;
+    i64 days = (i64)(y - 1970) * 365 + (y - 1969) / 4 + cum[t[4] % 12] + t[3] - 1 + (t[4] > 1 && y % 4 == 0);
+    return days * 86400 + t[2] * 3600 + t[1] * 60 + t[0];
+}
+static WINAPI double c_difftime(i64 a, i64 b) { return (double)(a - b); }
+static WINAPI u64 c_strftime(char *o, u64 n, const char *f, const void *t) { if (n) o[0] = 0; return 0; }
+/* setjmp / longjmp (our own layout; the program only hands the buffer back) */
+__attribute__((naked, ms_abi)) static int c__setjmp(void *buf, void *frame) {
+    __asm__ volatile(
+        "mov %rbx, (%rcx)\n lea 8(%rsp), %rax\n mov %rax, 8(%rcx)\n mov %rbp, 16(%rcx)\n mov %rsi, 24(%rcx)\n"
+        "mov %rdi, 32(%rcx)\n mov %r12, 40(%rcx)\n mov %r13, 48(%rcx)\n mov %r14, 56(%rcx)\n mov %r15, 64(%rcx)\n"
+        "mov (%rsp), %rax\n mov %rax, 72(%rcx)\n"
+        "movdqu %xmm6, 80(%rcx)\n movdqu %xmm7, 96(%rcx)\n movdqu %xmm8, 112(%rcx)\n movdqu %xmm9, 128(%rcx)\n"
+        "movdqu %xmm10, 144(%rcx)\n movdqu %xmm11, 160(%rcx)\n movdqu %xmm12, 176(%rcx)\n movdqu %xmm13, 192(%rcx)\n"
+        "movdqu %xmm14, 208(%rcx)\n movdqu %xmm15, 224(%rcx)\n xor %eax, %eax\n ret\n");
+}
+__attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
+    __asm__ volatile(
+        "mov %edx, %eax\n test %eax, %eax\n jnz 1f\n inc %eax\n1:\n"
+        "mov (%rcx), %rbx\n mov 16(%rcx), %rbp\n mov 24(%rcx), %rsi\n mov 32(%rcx), %rdi\n"
+        "mov 40(%rcx), %r12\n mov 48(%rcx), %r13\n mov 56(%rcx), %r14\n mov 64(%rcx), %r15\n"
+        "movdqu 80(%rcx), %xmm6\n movdqu 96(%rcx), %xmm7\n movdqu 112(%rcx), %xmm8\n movdqu 128(%rcx), %xmm9\n"
+        "movdqu 144(%rcx), %xmm10\n movdqu 160(%rcx), %xmm11\n movdqu 176(%rcx), %xmm12\n movdqu 192(%rcx), %xmm13\n"
+        "movdqu 208(%rcx), %xmm14\n movdqu 224(%rcx), %xmm15\n"
+        "mov 8(%rcx), %rsp\n jmp *72(%rcx)\n");
+}
+
+static const struct { const char *name; void *fn; } exports2[] = {
+    {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
+    {"ExitThread", k_ExitThread}, {"GetCurrentThread", k_GetCurrentThread}, {"GetCurrentThreadId", k_GetCurrentThreadId},
+    {"CreateEventA", k_CreateEventA}, {"CreateEventW", k_CreateEventA}, {"SetEvent", k_SetEvent}, {"ResetEvent", k_ResetEvent},
+    {"CreateMutexA", k_CreateMutexA}, {"CreateMutexW", k_CreateMutexA}, {"ReleaseMutex", k_ReleaseMutex},
+    {"CreateSemaphoreA", k_CreateSemaphoreA}, {"CreateSemaphoreW", k_CreateSemaphoreA}, {"ReleaseSemaphore", k_ReleaseSemaphore},
+    {"WaitForSingleObject", k_WaitForSingleObject}, {"WaitForSingleObjectEx", k_WaitForSingleObjectEx},
+    {"WaitForMultipleObjects", k_WaitForMultipleObjects}, {"CloseHandle", k_one}, {"TryEnterCriticalSection", k_one},
+    {"InitializeCriticalSectionEx", k_one}, {"AcquireSRWLockExclusive", k_zero}, {"ReleaseSRWLockExclusive", k_zero},
+    {"InitializeConditionVariable", k_zero}, {"SleepConditionVariableCS", k_SleepConditionVariableCS},
+    {"WakeConditionVariable", k_WakeConditionVariable}, {"WakeAllConditionVariable", k_WakeConditionVariable},
+    {"SetThreadPriority", k_one}, {"GetThreadPriority", k_zero}, {"ResumeThread", k_zero}, {"SuspendThread", k_zero},
+    {"SetThreadExecutionState", k_one}, {"SetProcessAffinityMask", k_one}, {"GetSystemInfo", k_GetSystemInfo},
+    {"GlobalMemoryStatusEx", k_GlobalMemoryStatusEx}, {"GetVersionExA", k_GetVersionExA}, {"GetVersionExW", k_GetVersionExA},
+    {"VerSetConditionMask", k_zero}, {"VerifyVersionInfoW", k_one}, {"IsProcessorFeaturePresent", k_IsProcessorFeaturePresent},
+    {"GetModuleFileNameA", k_GetModuleFileNameA}, {"GetModuleFileNameW", k_GetModuleFileNameW},
+    {"GetModuleHandleExW", k_GetModuleHandleExW}, {"LoadLibraryA", k_zero}, {"LoadLibraryW", k_zero},
+    {"LoadLibraryExW", k_zero}, {"GetProcAddress", k_zero}, {"FreeLibrary", k_one}, {"GetEnvironmentVariableA", k_zero},
+    {"SetEnvironmentVariableA", k_one}, {"SetErrorMode", k_zero}, {"lstrlenW", k_lstrlenW}, {"MulDiv", k_MulDiv},
+    {"OutputDebugStringW", k_OutputDebugStringW}, {"WriteConsoleW", k_WriteConsoleW}, {"SetConsoleTitleW", k_one},
+    {"GetFileType", k_GetFileType}, {"GlobalAlloc", k_GlobalAlloc}, {"GlobalLock", k_GlobalLock}, {"GlobalUnlock", k_one},
+    {"GlobalFree", k_GlobalFree}, {"LocalFree", k_zero}, {"RaiseException", k_RaiseException},
+    {"_strdup", c__strdup}, {"_stricmp", c__stricmp}, {"_strnicmp", c__strnicmp}, {"_strlwr", c__strlwr},
+    {"_strupr", c__strupr}, {"_strrev", c__strrev}, {"memchr", c_memchr}, {"strstr", c_strstr}, {"strspn", c_strspn},
+    {"strcspn", c_strcspn}, {"strpbrk", c_strpbrk}, {"strncat", c_strncat}, {"strncpy_s", c_strncpy_s}, {"strtok", c_strtok},
+    {"strcoll", c_strcmp}, {"strxfrm", c_strxfrm}, {"isdigit", c_isdigit}, {"isalpha", c_isalpha}, {"isalnum", c_isalnum},
+    {"isspace", c_isspace}, {"isupper", c_isupper}, {"islower", c_islower}, {"isxdigit", c_isxdigit}, {"iscntrl", c_iscntrl},
+    {"isgraph", c_isgraph}, {"ispunct", c_ispunct}, {"tolower", c_tolower}, {"toupper", c_toupper},
+    {"_strtoui64", c_strtoui64}, {"_strtoi64", c_strtoi64}, {"strtol", c_strtol}, {"strtoul", c_strtoul}, {"atol", c_atol},
+    {"atof", c_atof}, {"_itoa", c__itoa}, {"_ltoa", c__itoa}, {"_ultoa", c__ultoa}, {"_i64toa", c__i64toa},
+    {"_ui64toa", c__ui64toa}, {"_vscprintf", c__vscprintf}, {"div", c_div}, {"qsort", c_qsort}, {"bsearch", c_bsearch},
+    {"_assert", c__assert}, {"setlocale", c_setlocale}, {"getenv", c_getenv}, {"_write", c__write}, {"_fileno", c__fileno},
+    {"fputwc", c_fputwc}, {"fputws", c_fputws}, {"_fullpath", c__fullpath}, {"wcscmp", c_wcscmp}, {"wcscoll", c_wcscmp},
+    {"wcsncmp", c_wcsncmp}, {"wcscpy", c_wcscpy}, {"wcscat", c_wcscat}, {"wcscpy_s", c_wcscpy_s}, {"wcsncpy_s", c_wcsncpy_s},
+    {"wcsrchr", c_wcsrchr}, {"wcsstr", c_wcsstr}, {"_wcsicmp", c__wcsicmp}, {"_wcsnicmp", c__wcsnicmp},
+    {"towlower", c_towlower}, {"towupper", c_towupper}, {"wcstol", c_wcstol}, {"mbstowcs", c_mbstowcs},
+    {"wcstombs", c_wcstombs}, {"mbstowcs_s", c_mbstowcs_s}, {"wcstombs_s", c_wcstombs_s}, {"atan", c_atan},
+    {"asin", c_asin}, {"acos", c_acos}, {"tan", c_tan}, {"log10", c_log10}, {"sinh", c_sinh}, {"cosh", c_cosh},
+    {"tanh", c_tanh}, {"_gmtime64", c__gmtime64}, {"_localtime64", c__gmtime64}, {"_mktime64", c__mktime64},
+    {"difftime", c_difftime}, {"strftime", c_strftime}, {"_setjmp", c__setjmp}, {"longjmp", c_longjmp},
+    /* files: not yet (next phase) */
+    {"fopen", c_null}, {"_wfopen", c_null}, {"_fsopen", c_null}, {"_fdopen", c_null}, {"freopen", c_null},
+    {"_open", c_minus1}, {"_sopen", c_minus1}, {"_read", c_minus1}, {"_close", k_zero}, {"_lseeki64", c_minus1},
+    {"_filelengthi64", c_minus1}, {"_get_osfhandle", c_minus1}, {"_stat64", c_minus1}, {"_wstat64", c_minus1},
+    {"_fstat64", c_minus1}, {"_unlink", c_minus1}, {"_wunlink", c_minus1}, {"remove", c_minus1}, {"_wremove", c_minus1},
+    {"rename", c_minus1}, {"_wrename", c_minus1}, {"fclose", k_zero}, {"fread", k_zero}, {"fgets", c_null},
+    {"fgetc", c_minus1}, {"getc", c_minus1}, {"ungetc", c_minus1}, {"fseek", c_minus1}, {"ftell", c_minus1},
+    {"feof", k_one}, {"ferror", k_zero}, {"clearerr", k_zero}, {"setvbuf", k_zero}, {"fgetpos", c_minus1},
+    {"fsetpos", c_minus1}, {"CreateFileA", c_minus1}, {"CreateFileW", c_minus1}, {"FindFirstFileA", c_minus1},
+    {"FindFirstFileW", c_minus1}, {"GetFileAttributesW", c_minus1},
 };
 
 /* ---------- loader ---------- */
@@ -1096,7 +1490,7 @@ static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
     u16 nsec = RD16(fh + 2), ohsize = RD16(fh + 16);
     u32 img_size = RD32(oh + 56), hdr_size = RD32(oh + 60), ndirs = RD32(oh + 108);
     u64 pref_base = RD64(oh + 24);
-    if (img_size > 64u << 20 || hdr_size > size) return "el programa es demasiado grande";
+    if (img_size > 1024u << 20 || hdr_size > size) return "el programa es demasiado grande";
     p->raw = kzalloc(img_size + 4096);
     if (!p->raw) return "no hay memoria suficiente";
     u8 *img = (u8 *)(((uptr)p->raw + 4095) & ~(uptr)4095);
@@ -1143,6 +1537,8 @@ static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
                     int found = 0;
                     for (u32 j = 0; j < sizeof exports / sizeof exports[0]; j++)
                         if (strcmp(exports[j].name, name) == 0) { fn = exports[j].fn; found = 1; break; }
+                    for (u32 j = 0; !found && j < sizeof exports2 / sizeof exports2[0]; j++)
+                        if (strcmp(exports2[j].name, name) == 0) { fn = exports2[j].fn; found = 1; }
                     if (!found && unknown++ < 12) klog("exe: %s!%s no existe en Chamows (devolverá 0)\n", dll, name);
                 }
                 *(u64 *)(img + iat + 8 * k) = (u64)fn;
@@ -1155,8 +1551,9 @@ static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
         const u8 *t = img + RD32(dir + 9 * 8);
         u64 start = RD64(t), end = RD64(t + 8), idx = RD64(t + 16);
         u64 len = end > start ? end - start : 0;
-        p->tls = kzalloc(len + RD32(t + 32) + 16);
-        if (len) memcpy(p->tls, (void *)start, len);
+        p->tls_len = len + RD32(t + 32);
+        p->tls_template = kzalloc(p->tls_len + 16);
+        if (len) memcpy(p->tls_template, (void *)start, len);
         if (idx) *(u32 *)idx = 0;
         p->tls_cb = RD64(t + 24);
     }
@@ -1173,11 +1570,64 @@ static void fiber_main(void) {
     int rc = ((INTFN)p->entry)();
     proc_exit(rc);
 }
+static void thread_main(void) {
+    w32thread_t *t = cur_th;
+    u32 rc = ((u32 (WINAPI *)(u64))t->start)(t->param);
+    t->exit_code = rc;
+    t->done = 1;
+    yield(W_RUN);
+    for (;;) {}
+}
+/* A thread: its own stack, TEB and thread-local storage. It runs when the
+ * desktop loop gets to it and gives the CPU back at its next wait. */
+static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64 param, u32 stack_size) {
+    w32thread_t *t = kzalloc(sizeof *t);
+    if (!t) return NULL;
+    t->p = p;
+    t->stack = kmalloc(stack_size);
+    t->teb = kzalloc(0x1000);
+    t->tls = kzalloc(p->tls_len + 16);
+    if (!t->stack || !t->teb || !t->tls) { kfree(t->stack); kfree(t->teb); kfree(t->tls); kfree(t); return NULL; }
+    if (p->tls_template) memcpy(t->tls, p->tls_template, p->tls_len);
+    uptr top = ((uptr)t->stack + stack_size) & ~(uptr)15;
+    *(u64 *)(t->teb + 0x08) = top;
+    *(u64 *)(t->teb + 0x10) = (u64)t->stack;
+    *(u64 *)(t->teb + 0x30) = (u64)t->teb;
+    *(u64 *)(t->teb + 0x40) = 4;
+    t->id = next_tid += 4;
+    *(u64 *)(t->teb + 0x48) = t->id;
+    *(u64 *)(t->teb + 0x58) = (u64)(t->teb + 0x800); /* TLS array */
+    *(u64 *)(t->teb + 0x800) = (u64)t->tls;
+    *(u64 *)(t->teb + 0x60) = (u64)p->peb;
+    t->rsp = top - 64;
+    memset((void *)t->rsp, 0, 64);
+    *(u64 *)(t->rsp + 48) = (u64)entry;
+    t->start = start;
+    t->param = param;
+    w32thread_t **pp = &p->threads; /* keep creation order */
+    while (*pp) pp = &(*pp)->next;
+    *pp = t;
+    return t;
+}
 
-int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) {
+int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) { return pe_run_args(data, size, name, icon, ""); }
+int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args) {
     w32proc_t *p = kzalloc(sizeof *p);
     if (!p) return -1;
     strncpy0(p->name, name, sizeof p->name);
+    ksnprintf(p->cmdline, sizeof p->cmdline, *args ? "%s %s" : "%s", name, args);
+    for (int i = 0; i < 255 && p->cmdline[i]; i++) p->wcmdline[i] = (u8)p->cmdline[i];
+    /* argv: split on spaces (no quotes yet), in a copy */
+    char *buf = kzalloc(256);
+    strncpy0(buf, p->cmdline, 256);
+    for (char *q = buf; *q && p->argc < 16;) {
+        while (*q == ' ') *q++ = 0;
+        if (!*q) break;
+        p->argv[p->argc++] = q;
+        while (*q && *q != ' ') q++;
+    }
+    argc_var = p->argc;
+    argv_var = p->argv;
     p->icon = icon;
     w32proc_t *prev = cur;
     cur = p;
@@ -1188,28 +1638,14 @@ int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) {
         klog("exe: no se pudo abrir %s: %s\n", name, err);
         notify(icon, "No se pudo abrir el programa", err);
         kfree(p->raw);
-        kfree(p->tls);
+        kfree(p->tls_template);
         kfree(p);
         return -1;
     }
-    u32 stack_size = 512 * 1024;
-    p->stack = kmalloc(stack_size);
-    p->teb = kzalloc(0x1000);
     p->peb = kzalloc(0x400);
-    if (!p->stack || !p->teb || !p->peb) { kfree(p->raw); kfree(p->stack); kfree(p->teb); kfree(p->peb); kfree(p); return -1; }
-    uptr top = ((uptr)p->stack + stack_size) & ~(uptr)15;
-    *(u64 *)(p->teb + 0x08) = top;
-    *(u64 *)(p->teb + 0x10) = (u64)p->stack;
-    *(u64 *)(p->teb + 0x30) = (u64)p->teb;
-    *(u64 *)(p->teb + 0x40) = 4;
-    *(u64 *)(p->teb + 0x48) = 8;
-    *(u64 *)(p->teb + 0x58) = (u64)(p->teb + 0x800); /* TLS array */
-    *(u64 *)(p->teb + 0x800) = (u64)p->tls;
-    *(u64 *)(p->teb + 0x60) = (u64)p->peb;
+    if (!p->peb) { kfree(p->raw); kfree(p); return -1; }
     *(u64 *)(p->peb + 0x10) = (u64)p->image;
-    p->rsp = top - 64;
-    memset((void *)p->rsp, 0, 64);
-    *(u64 *)(p->rsp + 48) = (u64)fiber_main;
+    if (!thread_new(p, fiber_main, 0, 0, 1024 * 1024)) { kfree(p->raw); kfree(p->peb); kfree(p); return -1; }
     if (console) { cur = p; con_open(p); cur = prev; }
     p->next = procs;
     procs = p;
@@ -1224,21 +1660,23 @@ static void proc_free(w32proc_t *p) {
     if (box.p == p) box.p = NULL;
     while (p->blocks) p_free(p->blocks + 1);
     cur = prev;
-    kfree(p->raw); kfree(p->stack); kfree(p->teb); kfree(p->peb); kfree(p->tls);
-    p->raw = p->stack = p->teb = p->peb = p->tls = NULL;
+    for (w32thread_t *t = p->threads, *n; t; t = n) { n = t->next; kfree(t->stack); kfree(t->teb); kfree(t->tls); kfree(t); }
+    p->threads = NULL;
+    kfree(p->raw); kfree(p->peb); kfree(p->tls_template);
+    p->raw = p->peb = p->tls_template = NULL;
     p->wins = NULL;
     p->cleaned = 1;
     klog("exe: %s terminó (código %d)\n", p->name, p->exit_code);
 }
 
-static int ready(w32proc_t *p) {
-    switch (p->wait) {
+static int ready(w32proc_t *p, w32thread_t *t) {
+    switch (t->wait) {
     case W_MSG: {
         if (p->qcount || p->quit) return 1;
         for (w32win_t *w = p->wins; w; w = w->next) if (w->dirty && !w->destroyed && w->cw) return 1;
         return 0;
     }
-    case W_SLEEP: return (i32)(ticks_ms - p->wake_at) >= 0;
+    case W_SLEEP: return (i32)(ticks_ms - t->wake_at) >= 0;
     case W_BOX: return !p->box_open;
     }
     return 1;
@@ -1271,19 +1709,23 @@ void win32_poll(void) {
                     if (!t->pending) { t->pending = 1; post(p, w, 0x113, t->id, 0); }
                 }
             }
-        if (ready(p)) {
+        for (w32thread_t *t = p->threads; t && !p->done; t = t->next) {
+            if (t->done || !ready(p, t)) continue;
             cur = p;
-            set_gs((u64)p->teb);
-            ctx_switch(&kernel_rsp, p->rsp);
+            cur_th = t;
+            set_gs((u64)t->teb);
+            ctx_switch(&kernel_rsp, t->rsp);
             cur = NULL;
-            flush_windows(p);
+            cur_th = NULL;
         }
+        flush_windows(p);
         con_draw(p);
         pp = &p->next;
     }
 }
 
 #else /* 32-bit build: Windows programs need the 64-bit Chamows */
+int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args) { return pe_run(data, size, name, icon); }
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) {
     notify(icon, "No se pudo abrir el programa", "Los .exe solo funcionan en Chamows de 64 bits.");
     return -1;

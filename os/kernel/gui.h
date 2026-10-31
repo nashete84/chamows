@@ -92,6 +92,7 @@ int app_running(const char *id);
 
 /* ---- Windows programs (win32/win32.c) ---- */
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon);
+int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args);
 void win32_poll(void);
 
 /* ---- built-in apps (builtin.c) ---- */

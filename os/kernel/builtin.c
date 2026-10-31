@@ -277,7 +277,7 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
         const char *a = arg;
         if ((a[0] == 'd' || a[0] == 'D') && a[1] == ':') a += 2;
         while (*a == '\\' || *a == '/') a++;
-        for (; *a && k < 63; a++) path[k++] = *a == '\\' ? '/' : (*a >= 'a' && *a <= 'z') ? (char)(*a - 32) : *a;
+        for (; *a && *a != ' ' && k < 63; a++) path[k++] = *a == '\\' ? '/' : (*a >= 'a' && *a <= 'z') ? (char)(*a - 32) : *a;
         path[k] = 0;
         if (k < 5 || strcmp(path + k - 4, ".EXE") != 0) { t_print(t, "Uso: ejecutar JUEGOS\\PROGRAMA.EXE"); return; }
         u8 *data;
@@ -285,7 +285,8 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
         if (fat_read(path, &data, &size) != 0) { t_print(t, "No encuentro ese archivo en el pendrive."); return; }
         const char *name = path;
         for (const char *q = path; *q; q++) if (*q == '/') name = q + 1;
-        int rc = pe_run(data, size, name, &ICON_APP);
+        while (*a == ' ') a++;
+        int rc = pe_run_args(data, size, name, &ICON_APP, a);
         kfree(data);
         t_print(t, rc == 0 ? "Programa abierto." : "No se pudo abrir el programa.");
     } else if (!strcmp(cmd, "cls") || !strcmp(cmd, "clear")) {
