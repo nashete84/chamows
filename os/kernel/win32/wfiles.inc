@@ -177,6 +177,10 @@ static u64 create_file(const char *name, u32 access, u32 disp) {
     if (fix_path(name, fp, sizeof fp) != 0) { last_error = 3; return INVALID_H; }
     if (!strcmp(name, "CONOUT$") || !strcmp(name, "CON")) return 0x11;
     if (!strcmp(name, "CONIN$")) return 0x10;
+    if ((name[0] == '\\' && name[1] == '\\' && (name[2] == '.' || name[2] == '?')) || !c_strncmp(name, "//./", 4)) {
+        last_error = 2; /* pipes and devices: there are none */
+        return INVALID_H;
+    }
     fat_entry_t e;
     int exists = fstat_path(fp, &e) == 0;
     /* FILE_FLAG_BACKUP_SEMANTICS opens folders: hand back a harmless file handle */
@@ -199,6 +203,7 @@ static u64 create_file(const char *name, u32 access, u32 disp) {
     int wr = (access & 0x40000000u) || (access & 0x10000000u) || (access & 2);
     int rd = (access & 0x80000000u) || (access & 0x10000000u) || (access & 1) || !wr;
     wfile_t *f = wf_open(fp, how, rd, wr);
+    if (wr && !f) klog("exe: no se pudo crear \"%s\"\n", name);
     if (!f) return INVALID_H;
     last_error = exists && (disp == 2 || disp == 4) ? 183 : 0;
     return (u64)f;
@@ -446,7 +451,8 @@ static WINAPI u32 f_GetLogicalDriveStringsW(u32 n, u16 *out) {
     return 4;
 }
 static WINAPI u32 f_GetLogicalDrives(void) { return 1u << 2; }
-static WINAPI u32 f_GetWindowsDirectoryW(u16 *out, u32 n) { return a2w("C:\\WINDOWS", out, n); }
+/* Chamows' own folder on the pendrive stands in for C:\Windows */
+static WINAPI u32 f_GetWindowsDirectoryW(u16 *out, u32 n) { if (fat_mounted) fat_mkdir("CHAMOWS"); return a2w("C:\\CHAMOWS", out, n); }
 static WINAPI u32 f_GetTempPathW(u32 n, u16 *out) { if (fat_mounted) fat_mkdir("TEMP"); return a2w("C:\\TEMP\\", out, n); }
 static WINAPI u32 f_GetTempPathA(u32 n, char *out) { if (fat_mounted) fat_mkdir("TEMP"); strncpy0(out, "C:\\TEMP\\", n); return 8; }
 static WINAPI u32 f_GetModuleFileNameW(void *m, u16 *out, u32 n) {
@@ -462,10 +468,10 @@ static WINAPI u32 f_GetModuleFileNameA(void *m, char *out, u32 n) {
     strncpy0(out, a, n);
     return (u32)strlen(out);
 }
-/* SHGetFolderPathW: every special folder is C:\APPDATA (8.3, so programs can write there) */
+/* SHGetFolderPathW: every special folder is C:\CHAMOWS\APPDATA */
 static WINAPI u32 f_SHGetFolderPathW(void *hwnd, int csidl, u64 tok, u32 fl, u16 *out) {
-    if (fat_mounted) fat_mkdir("APPDATA");
-    a2w("C:\\APPDATA", out, 260);
+    if (fat_mounted) { fat_mkdir("CHAMOWS"); fat_mkdir("CHAMOWS/APPDATA"); }
+    a2w("C:\\CHAMOWS\\APPDATA", out, 260);
     return 0;
 }
 
@@ -478,6 +484,7 @@ static wfile_t *fopen_mode(const char *name, const char *mode) {
     int plus = c_strchr(mode, '+') != NULL;
     char how = mode[0] == 'w' ? 'w' : mode[0] == 'a' ? 'a' : 'r';
     wfile_t *f = wf_open(fp, how, how == 'r' || plus, how != 'r' || plus);
+    if (how != 'r' && !f) klog("exe: no se pudo crear \"%s\"\n", name);
     if (!f) errno_ = last_error == 2 ? 2 : 13;
     return f;
 }
@@ -625,6 +632,7 @@ static WINAPI u16 *c__wfullpath(u16 *out, const u16 *p, u64 n) {
 
 /* ---- text conversion: UTF-8 (code page 65001) or Latin-1 for the rest ---- */
 static WINAPI int f_MultiByteToWideChar(u32 cp, u32 fl, const char *src, int n, u16 *dst, int max) {
+    if (!src) { last_error = 87; return 0; }
     if (n < 0) n = (int)strlen(src) + 1;
     int k = 0;
     for (int i = 0; i < n;) {
@@ -641,6 +649,7 @@ static WINAPI int f_MultiByteToWideChar(u32 cp, u32 fl, const char *src, int n, 
     return k;
 }
 static WINAPI int f_WideCharToMultiByte(u32 cp, u32 fl, const u16 *src, int n, char *dst, int max, const char *def, int *used) {
+    if (!src) { last_error = 87; return 0; }
     if (n < 0) { n = 0; while (src[n]) n++; n++; }
     int k = 0;
     if (used) *used = 0;
@@ -657,6 +666,18 @@ static WINAPI int f_WideCharToMultiByte(u32 cp, u32 fl, const u16 *src, int n, c
         k += len;
     }
     return k;
+}
+
+/* the program's own arguments, as wide strings in one block */
+static WINAPI u16 **f_CommandLineToArgvW(const u16 *cmd, int *argc) {
+    int n = cur->argc;
+    u64 len = (u64)(n + 1) * 8;
+    for (int i = 0; i < n; i++) len += (strlen(cur->argv[i]) + 1) * 2;
+    u16 **v = p_alloc(len, 1);
+    u16 *str = (u16 *)(v + n + 1);
+    for (int i = 0; i < n; i++) { v[i] = str; str += a2w(cur->argv[i], str, 4096) + 1; }
+    if (argc) *argc = n;
+    return v;
 }
 
 /* Checked before the other tables, so these replace the old stubs. */
@@ -678,7 +699,7 @@ static const struct { const char *name; void *fn; } exports_files[] = {
     {"GetWindowsDirectoryW", f_GetWindowsDirectoryW}, {"GetTempPathW", f_GetTempPathW}, {"GetTempPathA", f_GetTempPathA},
     {"GetModuleFileNameW", f_GetModuleFileNameW}, {"GetModuleFileNameA", f_GetModuleFileNameA},
     {"SHGetFolderPathW", f_SHGetFolderPathW}, {"MultiByteToWideChar", f_MultiByteToWideChar},
-    {"WideCharToMultiByte", f_WideCharToMultiByte},
+    {"WideCharToMultiByte", f_WideCharToMultiByte}, {"CommandLineToArgvW", f_CommandLineToArgvW},
     {"fopen", c_fopen}, {"_wfopen", c__wfopen}, {"fclose", c_fclose}, {"fread", c_fread}, {"fwrite", cf_fwrite},
     {"fputs", cf_fputs}, {"fputc", cf_fputc}, {"putc", cf_fputc}, {"fgetc", c_fgetc}, {"getc", c_fgetc}, {"ungetc", c_ungetc},
     {"fgets", c_fgets}, {"fseek", c_fseek}, {"_fseeki64", c__fseeki64}, {"ftell", c_ftell}, {"_ftelli64", c__ftelli64},

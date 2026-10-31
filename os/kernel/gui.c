@@ -675,6 +675,30 @@ static int win_alive(cw_window *w) {
     return 0;
 }
 
+int win_resize(cw_window *w, int nw, int nh) {
+    if (!win_alive(w)) return -1;
+    nw = imax(120, imin(nw, SCREEN_W - 20));
+    nh = imax(60, imin(nh, SCREEN_H - TASKBAR_H - TITLE_H - 20));
+    if (nw == w->w && nh == w->h) return 0;
+    u32 *px = kmalloc((size_t)nw * nh * 4);
+    if (!px) return -1;
+    surface_t ns;
+    surf_init(&ns, px, nw, nh);
+    fill_rect(&ns, 0, 0, nw, nh, 0xFF000000);
+    blit(&ns, &w->surf, 0, 0, imin(nw, w->w), imin(nh, w->h), 0, 0);
+    invalidate_rect(frame_with_shadow(w));
+    kfree(w->surf.px);
+    w->surf = ns;
+    w->w = nw;
+    w->h = nh;
+    if (w->y + TITLE_H + nh > SCREEN_H - TASKBAR_H) w->y = imax(0, SCREEN_H - TASKBAR_H - TITLE_H - nh);
+    if (w->x + nw > SCREEN_W) w->x = imax(0, SCREEN_W - nw);
+    invalidate_rect(frame_with_shadow(w));
+    return 0;
+}
+cw_window *win_top(void) { return top_window(); }
+void mouse_pos(int *x, int *y) { *x = mx; *y = my; }
+
 void win_close(cw_window *w) {
     if (!win_alive(w) || w->closing) return;
     w->closing = 1;
@@ -916,6 +940,10 @@ static void handle_mouse(const input_event_t *ev) {
         invalidate_rect(frame_with_shadow(drag_win));
     } else if (capture_win && (ox != mx || oy != my)) {
         send(capture_win, CW_MOUSE_MOVE, mx - capture_win->x, my - capture_win->y - TITLE_H, 0, mbuttons & 1 ? 1 : 2);
+    } else if (!mbuttons && (ox != mx || oy != my)) {
+        cw_window *t = top_window();
+        if (t && t->hover && !t->minimized && rect_has((rect_t){t->x, t->y + TITLE_H, t->w, t->h}, mx, my))
+            send(t, CW_MOUSE_MOVE, mx - t->x, my - t->y - TITLE_H, 0, 0);
     }
     int pressed = ev->buttons & ~mbuttons, released = mbuttons & ~ev->buttons;
     mbuttons = ev->buttons;

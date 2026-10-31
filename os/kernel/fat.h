@@ -1,12 +1,12 @@
-/* Chamows FAT32 file system on the USB disk. Names are 8.3 ("APPS/CALC.ELF");
- * long names written by other systems show up as their short form. */
+/* Chamows FAT32 file system on the USB disk. Paths look like "APPS/CALC.ELF";
+ * long names (written here or by other systems) are in fat_entry_t.lname. */
 #ifndef CHAMOWS_FAT_H
 #define CHAMOWS_FAT_H
 #include "kernel.h"
 
 /* name: the 8.3 name, used to build paths. lname: the long name when the
  * folder has one (written by Windows or macOS), otherwise the same as name.
- * Paths may use either; new files and folders still need 8.3 names. */
+ * Paths may use either. */
 typedef struct { char name[13]; char lname[64]; u32 size; u8 is_dir; } fat_entry_t;
 
 int fat_mount(void);                       /* 0 when the USB disk has FAT32 */

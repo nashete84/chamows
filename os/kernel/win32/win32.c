@@ -21,7 +21,7 @@ typedef struct { void *hwnd; u32 message; u64 wparam; i64 lparam; u32 time; i32 
 typedef struct { i32 left, top, right, bottom; } RECT;
 
 enum { K_BRUSH = 1, K_PEN, K_FONT, K_BITMAP };
-typedef struct gobj { int kind; u32 color; int width, font, null; surface_t surf; } gobj_t;
+typedef struct gobj { int kind; u32 color; int width, font, null; surface_t surf; int dib; u32 *base; } gobj_t; /* dib: pixels the program writes; base: their allocation */
 struct w32win;
 typedef struct { struct w32win *w; gobj_t *brush, *pen, *font, *bmp; u32 text, bk; int bkmode, cx, cy; } dc_t;
 
@@ -34,6 +34,9 @@ typedef struct w32win {
     u32 bg;              /* class background, 0 = none */
     int dirty, erase, touched, destroyed;
     i64 userdata;
+    u32 style, exstyle;
+    int activated, hidden;   /* hidden: HWND_MESSAGE windows, never on screen */
+    struct { char name[32]; u64 v; } props[8];
     dc_t dc;
     wtimer_t timers[8];
     struct w32win *next;
@@ -351,6 +354,31 @@ static int key_to_vk(int k, int *ch) {
 }
 static u32 key_until[256]; /* GetAsyncKeyState: a key counts as held shortly after each press */
 
+/* PC scancodes (set 1) for WM_KEYDOWN's lParam; SDL reads keys from them */
+static u32 vk_scan(int vk) {
+    static const char *letters = "\x1E\x30\x2E\x20\x12\x21\x22\x23\x17\x24\x25\x26\x32\x31\x18\x19\x10\x13\x1F\x14\x16\x2F\x11\x2D\x15\x2C";
+    if (vk >= 'A' && vk <= 'Z') return (u8)letters[vk - 'A'];
+    if (vk >= '1' && vk <= '9') return (u32)(vk - '1' + 2);
+    switch (vk) {
+    case '0': return 0x0B;
+    case 0x08: return 0x0E;
+    case 0x09: return 0x0F;
+    case 0x0D: return 0x1C;
+    case 0x1B: return 0x01;
+    case ' ': return 0x39;
+    case 0x26: return 0x148; /* extended keys: bit 8 */
+    case 0x28: return 0x150;
+    case 0x25: return 0x14B;
+    case 0x27: return 0x14D;
+    case 0x24: return 0x147;
+    case 0x23: return 0x14F;
+    case 0x21: return 0x149;
+    case 0x22: return 0x151;
+    case 0x2E: return 0x153;
+    }
+    return 0;
+}
+
 static void win_event(cw_window *cw, const cw_event *ev) {
     w32win_t *w = cw->user;
     w32proc_t *p = w->p;
@@ -359,11 +387,15 @@ static void win_event(cw_window *cw, const cw_event *ev) {
     switch (ev->type) {
     case CW_MOUSE_DOWN: post(p, w, ev->button == 2 ? 0x204 : 0x201, ev->button == 2 ? 2 : 1, lp); break;
     case CW_MOUSE_UP: post(p, w, ev->button == 2 ? 0x205 : 0x202, 0, lp); break;
-    case CW_MOUSE_MOVE: post(p, w, 0x200, 0, lp); break;
+    case CW_MOUSE_MOVE: post(p, w, 0x200, ev->button == 1 ? 1 : ev->button == 2 ? 2 : 0, lp); break;
     case CW_KEY: {
+        /* Chamows only reports presses: send WM_KEYDOWN, WM_CHAR and WM_KEYUP together */
         int ch, vk = key_to_vk(ev->key, &ch);
-        if (vk) { post(p, w, 0x100, (u64)vk, 1); key_until[vk] = ticks_ms + 150; }
-        if (ch) post(p, w, 0x102, (u64)(u8)ch, 1);
+        u32 sc = vk_scan(vk);
+        i64 klp = 1 | (i64)(sc & 0xFF) << 16 | (sc & 0x100 ? 1 << 24 : 0);
+        if (vk) { post(p, w, 0x100, (u64)vk, klp); key_until[vk] = ticks_ms + 150; }
+        if (ch) post(p, w, 0x102, (u64)(u8)ch, klp);
+        if (vk) post(p, w, 0x101, (u64)vk, klp | (i64)0xC0000000);
         break;
     }
     case CW_CLOSE:
@@ -386,14 +418,14 @@ static void stock_init(void) {
     if (done) return;
     done = 1;
     u32 grays[5] = {0xFFFFFFFF, 0xFFC0C0C0, 0xFF808080, 0xFF404040, 0xFF000000};
-    for (int i = 0; i < 5; i++) stock_obj[i] = (gobj_t){K_BRUSH, grays[i], 0, 0, 0, {0}};
-    stock_obj[5] = (gobj_t){K_BRUSH, 0, 0, 0, 1, {0}};
-    stock_obj[6] = (gobj_t){K_PEN, 0xFFFFFFFF, 1, 0, 0, {0}};
-    stock_obj[7] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}};
-    stock_obj[8] = (gobj_t){K_PEN, 0, 1, 0, 1, {0}};
-    for (int i = 10; i <= 17; i++) stock_obj[i] = (gobj_t){K_FONT, 0, 0, CW_FONT_UI, 0, {0}};
-    stock_obj[18] = (gobj_t){K_BRUSH, 0xFFFFFFFF, 0, 0, 0, {0}};
-    stock_obj[19] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}};
+    for (int i = 0; i < 5; i++) stock_obj[i] = (gobj_t){K_BRUSH, grays[i], 0, 0, 0, {0}, 0, NULL};
+    stock_obj[5] = (gobj_t){K_BRUSH, 0, 0, 0, 1, {0}, 0, NULL};
+    stock_obj[6] = (gobj_t){K_PEN, 0xFFFFFFFF, 1, 0, 0, {0}, 0, NULL};
+    stock_obj[7] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}, 0, NULL};
+    stock_obj[8] = (gobj_t){K_PEN, 0, 1, 0, 1, {0}, 0, NULL};
+    for (int i = 10; i <= 17; i++) stock_obj[i] = (gobj_t){K_FONT, 0, 0, CW_FONT_UI, 0, {0}, 0, NULL};
+    stock_obj[18] = (gobj_t){K_BRUSH, 0xFFFFFFFF, 0, 0, 0, {0}, 0, NULL};
+    stock_obj[19] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}, 0, NULL};
 }
 static void dc_init(dc_t *d, w32win_t *w) {
     stock_init();
@@ -792,7 +824,7 @@ static WINAPI void *g_SelectObject(dc_t *d, gobj_t *o) {
 }
 static WINAPI int g_DeleteObject(gobj_t *o) {
     if (!o || (o >= stock_obj && o < stock_obj + 20)) return 1;
-    if (o->kind == K_BITMAP) kfree(o->surf.px);
+    if (o->kind == K_BITMAP) kfree(o->base ? o->base : o->surf.px);
     p_free(o);
     return 1;
 }
@@ -897,6 +929,11 @@ static WINAPI int g_BitBlt(dc_t *dst, int x, int y, int w, int h, dc_t *src, int
     if (rop == 0x42) { fill_rect(d, x, y, w, h, 0xFF000000); return 1; }      /* BLACKNESS */
     if (rop == 0xFF0062) { fill_rect(d, x, y, w, h, 0xFFFFFFFF); return 1; }  /* WHITENESS */
     if (s) blit(d, s, sx, sy, w, h, x, y);
+    if (s && src->bmp && src->bmp->dib) { /* programs leave alpha at 0: make the pixels opaque */
+        rect_t r = rect_intersect((rect_t){x, y, w, h}, d->clip);
+        for (int yy = 0; yy < r.h; yy++)
+            for (int xx = 0; xx < r.w; xx++) d->px[(r.y + yy) * d->stride + r.x + xx] |= 0xFF000000;
+    }
     return 1;
 }
 static WINAPI int u_MessageBeep(u32 t) { return 1; }
@@ -1039,6 +1076,28 @@ static int argc_var;
 static char **argv_var;
 
 static WINAPI u64 unknown_import(void) { return 0; }
+/* Unknown imports get a tiny thunk that puts the function's name in r10, so
+ * the first calls of each one show up in the log ("exe: llamada a X"). */
+const char *unk_name;
+static const char *unk_seen[96];
+static int n_unk_seen;
+WINAPI u64 unknown_logged(void) {
+    const char *n = unk_name;
+    for (int i = 0; i < n_unk_seen; i++) if (unk_seen[i] == n) return 0;
+    if (n_unk_seen < 96) { unk_seen[n_unk_seen++] = n; klog("exe: llamada a %s (no existe, devuelve 0)\n", n); }
+    return 0;
+}
+__attribute__((naked)) static void unknown_stub(void) {
+    __asm__ volatile("mov %r10, unk_name(%rip)\n\tjmp unknown_logged");
+}
+static void *unknown_thunk(const char *name) {
+    u8 *t = kmalloc(24); /* small; kept after the program ends */
+    if (!t) return (void *)unknown_import;
+    t[0] = 0x49; t[1] = 0xBA; *(u64 *)(t + 2) = (u64)name;               /* mov r10, name */
+    t[10] = 0x49; t[11] = 0xBB; *(u64 *)(t + 12) = (u64)unknown_stub;    /* mov r11, stub */
+    t[20] = 0x41; t[21] = 0xFF; t[22] = 0xE3;                            /* jmp r11 */
+    return t;
+}
 
 static const struct { const char *name; void *fn; } exports[] = {
     /* kernel32 */
@@ -1426,6 +1485,7 @@ __attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
 }
 
 #include "wfiles.inc"
+#include "wgui.inc"
 
 static const struct { const char *name; void *fn; } exports2[] = {
     {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
@@ -1540,10 +1600,13 @@ static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
                     int found = 0;
                     for (u32 j = 0; j < sizeof exports_files / sizeof exports_files[0]; j++)
                         if (strcmp(exports_files[j].name, name) == 0) { fn = exports_files[j].fn; found = 1; break; }
+                    for (u32 j = 0; !found && j < sizeof exports_gui / sizeof exports_gui[0]; j++)
+                        if (strcmp(exports_gui[j].name, name) == 0) { fn = exports_gui[j].fn; found = 1; break; }
                     for (u32 j = 0; !found && j < sizeof exports / sizeof exports[0]; j++)
                         if (strcmp(exports[j].name, name) == 0) { fn = exports[j].fn; found = 1; break; }
                     for (u32 j = 0; !found && j < sizeof exports2 / sizeof exports2[0]; j++)
                         if (strcmp(exports2[j].name, name) == 0) { fn = exports2[j].fn; found = 1; }
+                    if (!found) fn = unknown_thunk(name);
                     if (!found && unknown++ < 12) klog("exe: %s!%s no existe en Chamows (devolverá 0)\n", dll, name);
                 }
                 *(u64 *)(img + iat + 8 * k) = (u64)fn;
@@ -1623,6 +1686,12 @@ int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, 
     strncpy0(p->name, name, sizeof p->name);
     strncpy0(p->cwd, pe_dir, sizeof p->cwd);
     pe_dir[0] = 0;
+    /* ScummVM picks OpenGL by default, which Chamows lacks: ask for its software renderer */
+    char extra[256];
+    if (!stricmp_(name, "SCUMMVM.EXE") && !c_strstr(args, "--gfx-mode")) {
+        ksnprintf(extra, sizeof extra, *args ? "--gfx-mode=surfacesdl %s" : "--gfx-mode=surfacesdl", args);
+        args = extra;
+    }
     ksnprintf(p->cmdline, sizeof p->cmdline, *args ? "%s %s" : "%s", name, args);
     for (int i = 0; i < 255 && p->cmdline[i]; i++) p->wcmdline[i] = (u8)p->cmdline[i];
     /* argv: split on spaces (no quotes yet), in a copy */

@@ -29,6 +29,7 @@ struct cw_window {
     u32 next_tick;
     int minimized;
     int closing;
+    int hover;                /* also send CW_MOUSE_MOVE (button 0) without a button held */
     struct app_instance *app; /* NULL for built-in apps */
     struct cw_window *next;   /* z-order: list head is the bottom */
 };
@@ -44,6 +45,9 @@ cw_window *win_create(const char *title, int w, int h, cw_event_fn fn, void *use
 void win_close(cw_window *w);
 void win_invalidate(cw_window *w);
 void win_focus(cw_window *w);
+int win_resize(cw_window *w, int cw, int ch);   /* new client size; 0 on success */
+cw_window *win_top(void);                       /* the focused window, or NULL */
+void mouse_pos(int *x, int *y);                 /* pointer position on screen */
 extern const cw_api *kernel_api;
 
 /* launcher: built-in ids ("store", "terminal", "pc") or installed app ids */
