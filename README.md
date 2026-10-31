@@ -20,9 +20,11 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
   Office, Steam o Chrome. Desde la Tienda o con `ejecutar JUEGOS\JUEGO.EXE`.
   También hilos, archivos del pendrive (C:\ y D:\, nombres largos) y lo que
   usa SDL2: el **ScummVM oficial de Windows (64 bits) abre su menú** y se
-  maneja con ratón y teclado. Sin sonido, sin OpenGL y sin teclas F1-F12.
+  maneja con ratón y teclado; The Secret of Monkey Island se juega. Sin sonido
+  ni música, sin OpenGL y sin teclas F1-F12.
   Para probarlo: copia el contenido del zip de ScummVM al pendrive y ejecuta
-  `ejecutar scummvm.exe` (QEMU necesita `-m 1024`).
+  `ejecutar scummvm.exe` (QEMU necesita `-m 1024`). Un juego directo:
+  `ejecutar scummvm.exe -p MONKEY --auto-detect`.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.

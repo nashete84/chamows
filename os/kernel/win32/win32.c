@@ -1686,10 +1686,15 @@ int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, 
     strncpy0(p->name, name, sizeof p->name);
     strncpy0(p->cwd, pe_dir, sizeof p->cwd);
     pe_dir[0] = 0;
-    /* ScummVM picks OpenGL by default, which Chamows lacks: ask for its software renderer */
+    /* ScummVM picks OpenGL by default, which Chamows lacks: ask for its software
+     * renderer. With no sound card its music never ends and games wait for it
+     * forever, so music is switched off too. */
     char extra[256];
-    if (!stricmp_(name, "SCUMMVM.EXE") && !c_strstr(args, "--gfx-mode")) {
-        ksnprintf(extra, sizeof extra, *args ? "--gfx-mode=surfacesdl %s" : "--gfx-mode=surfacesdl", args);
+    if (!stricmp_(name, "SCUMMVM.EXE")) {
+        ksnprintf(extra, sizeof extra, "%s%s%s", c_strstr(args, "--gfx-mode") ? "" : "--gfx-mode=surfacesdl ",
+                  c_strstr(args, "--music-driver") ? "" : "--music-driver=null ", args);
+        int n = (int)strlen(extra);
+        while (n && extra[n - 1] == ' ') extra[--n] = 0;
         args = extra;
     }
     ksnprintf(p->cmdline, sizeof p->cmdline, *args ? "%s %s" : "%s", name, args);

@@ -522,6 +522,9 @@ static WINAPI int c_fseek(void *p, i32 off, int wh) { wfile_t *f = WF((u64)p); r
 static WINAPI int c__fseeki64(void *p, i64 off, int wh) { wfile_t *f = WF((u64)p); return f && wf_seek(f, off, wh) >= 0 ? 0 : -1; }
 static WINAPI i32 c_ftell(void *p) { wfile_t *f = WF((u64)p); return f ? (i32)f->pos : -1; }
 static WINAPI i64 c__ftelli64(void *p) { wfile_t *f = WF((u64)p); return f ? (i64)f->pos : -1; }
+/* MinGW's fseeko64/ftello64 go through these */
+static WINAPI int c_fgetpos(void *p, i64 *pos) { wfile_t *f = WF((u64)p); if (!f) return -1; *pos = (i64)f->pos; return 0; }
+static WINAPI int c_fsetpos(void *p, const i64 *pos) { wfile_t *f = WF((u64)p); return f && wf_seek(f, *pos, 0) >= 0 ? 0 : -1; }
 static WINAPI int c_feof(void *p) { wfile_t *f = WF((u64)p); return f ? f->eof : 0; }
 static WINAPI int c_ferror(void *p) { wfile_t *f = WF((u64)p); return f ? f->err : 0; }
 static WINAPI void c_clearerr(void *p) { wfile_t *f = WF((u64)p); if (f) f->eof = f->err = 0; }
@@ -703,7 +706,7 @@ static const struct { const char *name; void *fn; } exports_files[] = {
     {"fopen", c_fopen}, {"_wfopen", c__wfopen}, {"fclose", c_fclose}, {"fread", c_fread}, {"fwrite", cf_fwrite},
     {"fputs", cf_fputs}, {"fputc", cf_fputc}, {"putc", cf_fputc}, {"fgetc", c_fgetc}, {"getc", c_fgetc}, {"ungetc", c_ungetc},
     {"fgets", c_fgets}, {"fseek", c_fseek}, {"_fseeki64", c__fseeki64}, {"ftell", c_ftell}, {"_ftelli64", c__ftelli64},
-    {"feof", c_feof}, {"ferror", c_ferror}, {"clearerr", c_clearerr}, {"rewind", c_rewind}, {"fflush", cf_fflush},
+    {"fgetpos", c_fgetpos}, {"fsetpos", c_fsetpos}, {"feof", c_feof}, {"ferror", c_ferror}, {"clearerr", c_clearerr}, {"rewind", c_rewind}, {"fflush", cf_fflush},
     {"fprintf", cf_fprintf}, {"vfprintf", cf_vfprintf}, {"_fileno", cf__fileno}, {"_open", c__open}, {"_wopen", c__wopen},
     {"_read", c__read}, {"_write", cf__write}, {"_close", c__close}, {"_lseek", c__lseek}, {"_lseeki64", c__lseeki64},
     {"_filelengthi64", c__filelengthi64}, {"_get_osfhandle", c__get_osfhandle}, {"_stat64", c__stat64},
