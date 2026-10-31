@@ -28,6 +28,9 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
 - **Red** (tarjeta Intel e1000): DHCP, DNS, ping y TCP. En la terminal: `red`,
   `ping <equipo>`, `nslookup <nombre>` y `http <equipo[:puerto]> [ruta]`.
   Los programas .exe tienen Winsock: sockets TCP y UDP, select, WSAAsyncSelect y getaddrinfo.
+- **DLL**: los .exe cargan sus propias DLL desde el pendrive (junto al programa,
+  la carpeta actual o `C:\CHAMOWS\SYSTEM`), con DllMain, TLS, LoadLibrary y GetProcAddress.
+  Probado con el SDL2.dll oficial.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.

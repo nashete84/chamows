@@ -198,3 +198,14 @@ pequeños desde internet, y una app propia de mensajes.
 - **Fin de conexión:** se usa tcp_eof (el otro lado cerró) en vez del estado TCP, porque CLOSE_WAIT todavía parecía "vivo" y FD_CLOSE nunca llegaba.
 - **No hay todavía:** listen/accept (servidor), IPv6, E/S solapada (overlapped/IOCP) y WSAIoctl. La búsqueda DNS detiene el escritorio un momento.
 - **Probado en QEMU:** un .exe de prueba hizo connect con y sin bloqueo, select, gethostbyname y UDP; otro con WSAAsyncSelect recibió FD_CONNECT, FD_READ (289 bytes) y FD_CLOSE contra un servidor HTTP del anfitrión.
+
+## 24. Cargar DLL (paso 3 hacia Telegram Desktop)
+- **Dos tipos de DLL:** las de Windows (kernel32, user32, ws2_32, api-ms-win-*...) no son archivos: sus funciones son la capa Win32 de Chamows. Las demás (Qt, SDL...) se buscan en disco: junto al .exe, en la carpeta de SetDllDirectory, en la carpeta actual y en `C:\CHAMOWS\SYSTEM`. Rechazado: cargar las DLL de un Windows real (necesitan el núcleo de Windows por debajo).
+- **Cómo se carga:** igual que el .exe (secciones, reubicación), luego sus imports cargan otras DLL en cadena. Exports por nombre (búsqueda binaria, con la pista del import), por número y reenviados (`DLL.Función`). Si una DLL que no es de Windows no está, sus funciones se buscan en la capa Win32 como antes, para no romper programas que ya funcionaban.
+- **Orden de arranque:** DllMain(PROCESS_ATTACH) de las dependencias primero, luego el .exe. También THREAD_ATTACH/DETACH en cada hilo y PROCESS_DETACH al salir. FreeLibrary descarga la DLL cuando nadie la usa.
+- **TLS por módulo:** cada .exe o DLL con sección .tls tiene su hueco en la tabla TLS del hilo (hasta 16). Las DLL cargadas después también lo reciben en los hilos que ya existen.
+- **Recursos:** FindResource, LoadResource, SizeofResource y LoadString leen los recursos de cualquier módulo.
+- **atexit por programa:** antes era global y un programa podía llamar código de otro que ya había terminado.
+- **Aviso de herramientas:** GNU ld enlaza mal la TLS nativa de clang dentro de una DLL (marca como reubicable un desplazamiento que no lo es). No es un fallo de Chamows; con lld funciona.
+- **No hay todavía:** excepciones de C++/SEH que atraviesan DLL (RtlLookupFunctionEntry y desenrollado), retraso de imports (delay-load) y DLL de 32 bits.
+- **Probado en QEMU:** un .exe con tres DLL propias (cadena de imports, reenvío, ordinal, TLS en hilos, recurso de texto, LoadLibrary/GetProcAddress/FreeLibrary, DLL inexistente da error 126). Un programa con el SDL2.dll oficial 2.30.9 abre su ventana y dibuja 175 fotogramas en 6 s. ScummVM sigue abriendo su lanzador.

@@ -50,7 +50,7 @@ typedef struct blk { struct blk *next, *prev; u64 size, pad; } blk_t;
 typedef struct w32thread {
     struct w32proc *p;
     uptr rsp;
-    u8 *stack, *teb, *tls;
+    u8 *stack, *teb, *tlsb[16];   /* tlsb: one thread-local block per module with TLS */
     int wait;            /* W_RUN, W_MSG, W_SLEEP, W_BOX */
     u32 wake_at, id, exit_code;
     int done;
@@ -70,10 +70,17 @@ typedef struct w32proc {
     int argc;
     char cwd[160];          /* current directory on the pendrive, "" = root */
     const icon_t *icon;
-    u8 *raw, *image;
+    u8 *raw, *image;        /* the .exe in memory (also p->exe) */
     u64 entry;
-    u8 *peb, *tls_template;
-    u64 tls_len;
+    u8 *peb;
+    struct w32mod *mods, *exe; /* loaded modules: the .exe and its DLLs */
+    struct w32mod *init_order[64];
+    int ninit;
+    struct { u8 *tmpl; u64 len; } tlsm[16]; /* thread-local data templates */
+    int ntls, detached;
+    char exedir[160], dlldir[160];
+    VOIDFN atexit_fns[32];
+    int n_atexit;
     w32thread_t *threads;
     int done, killed, cleaned, quit, exit_code;
     MSG q[QMAX];
@@ -82,7 +89,6 @@ typedef struct w32proc {
     wclass_t classes[16];
     int nclasses;
     blk_t *blocks;
-    u64 tls_cb;          /* address of the TLS callback list, 0 = none */
     /* console */
     cw_window *con;
     char con_text[CON_ROWS][CON_COLS + 1];
@@ -462,7 +468,8 @@ static void fill_ellipse(surface_t *s, int l, int t, int r, int b, u32 c) {
 
 /* ---------- the Win32 functions ---------- */
 /* kernel32 */
-static WINAPI void k_ExitProcess(u32 code) { proc_exit((int)code); }
+static void mods_detach(w32proc_t *p);
+static WINAPI void k_ExitProcess(u32 code) { mods_detach(cur); proc_exit((int)code); }
 static WINAPI void *k_GetModuleHandleA(const char *n) { return n ? NULL : cur->image; }
 static WINAPI const char *k_GetCommandLineA(void) { return cur->cmdline; }
 static WINAPI const u16 *k_GetCommandLineW(void) { return cur->wcmdline; }
@@ -943,8 +950,6 @@ static WINAPI int u_MessageBeep(u32 t) { return 1; }
 typedef struct { u8 pad[48]; } FILE_;
 static FILE_ iob[3];
 static int fmode, commode, errno_;
-static VOIDFN atexit_fns[32];
-static int n_atexit;
 static char *envp0[1];
 static int out_file(void *f) { return f == &iob[1] || f == &iob[2]; }
 static WINAPI void *c___iob_func(void) { return iob; }
@@ -959,13 +964,14 @@ static WINAPI int *c__errno(void) { return &errno_; }
 static WINAPI void c__initterm(VOIDFN *a, VOIDFN *b) { for (; a < b; a++) if (*a) (*a)(); }
 static WINAPI int c__initterm_e(INTFN *a, INTFN *b) { for (; a < b; a++) if (*a) { int r = (*a)(); if (r) return r; } return 0; }
 static WINAPI void c_exit(int code) {
-    while (n_atexit) atexit_fns[--n_atexit]();
+    while (cur->n_atexit) cur->atexit_fns[--cur->n_atexit]();
+    mods_detach(cur);
     proc_exit(code);
 }
 static WINAPI void c__exit(int code) { proc_exit(code); }
 static WINAPI void c_abort(void) { klog("exe: el programa llamó a abort()\n"); proc_exit(3); }
 static WINAPI void c__amsg_exit(int n) { klog("exe: error interno del programa (%d)\n", n); proc_exit(255); }
-static WINAPI int c_atexit(VOIDFN f) { if (n_atexit < 32) atexit_fns[n_atexit++] = f; return 0; }
+static WINAPI int c_atexit(VOIDFN f) { if (cur->n_atexit < 32) cur->atexit_fns[cur->n_atexit++] = f; return 0; }
 static WINAPI void *c__onexit(VOIDFN f) { c_atexit(f); return (void *)f; }
 static WINAPI void *c_malloc(u64 n) { return p_alloc(n ? n : 1, 0); }
 static WINAPI void *c_calloc(u64 a, u64 b) { u64 n = a * b; return p_alloc(n ? n : 1, 1); }
@@ -1084,7 +1090,7 @@ static const char *unk_seen[96];
 static int n_unk_seen;
 WINAPI u64 unknown_logged(void) {
     const char *n = unk_name;
-    for (int i = 0; i < n_unk_seen; i++) if (unk_seen[i] == n) return 0;
+    for (int i = 0; i < n_unk_seen; i++) if (strcmp(unk_seen[i], n) == 0) return 0;
     if (n_unk_seen < 96) { unk_seen[n_unk_seen++] = n; klog("exe: llamada a %s (no existe, devuelve 0)\n", n); }
     return 0;
 }
@@ -1092,9 +1098,11 @@ __attribute__((naked)) static void unknown_stub(void) {
     __asm__ volatile("mov %r10, unk_name(%rip)\n\tjmp unknown_logged");
 }
 static void *unknown_thunk(const char *name) {
-    u8 *t = kmalloc(24); /* small; kept after the program ends */
+    u32 n = (u32)strlen(name) + 1;
+    u8 *t = kmalloc(24 + n); /* small; kept after the program ends, with its own copy of the name */
     if (!t) return (void *)unknown_import;
-    t[0] = 0x49; t[1] = 0xBA; *(u64 *)(t + 2) = (u64)name;               /* mov r10, name */
+    memcpy(t + 24, name, n);
+    t[0] = 0x49; t[1] = 0xBA; *(u64 *)(t + 2) = (u64)(t + 24);         /* mov r10, name */
     t[10] = 0x49; t[11] = 0xBB; *(u64 *)(t + 12) = (u64)unknown_stub;    /* mov r11, stub */
     t[20] = 0x41; t[21] = 0xFF; t[22] = 0xE3;                            /* jmp r11 */
     return t;
@@ -1182,7 +1190,8 @@ static WINAPI u64 k_CreateThread(void *sa, u64 stack, u64 start, u64 param, u32 
     return (u64)h;
 }
 static WINAPI u64 c__beginthreadex(void *sa, u32 stack, u64 start, u64 param, u32 flags, u32 *tid) { return k_CreateThread(sa, stack, start, param, flags, tid); }
-static WINAPI void k_ExitThread(u32 code) { cur_th->exit_code = code; cur_th->done = 1; yield(W_RUN); for (;;) {} }
+static void mods_thread(w32proc_t *p, u32 reason);
+static WINAPI void k_ExitThread(u32 code) { mods_thread(cur, 3); cur_th->exit_code = code; cur_th->done = 1; yield(W_RUN); for (;;) {} }
 static WINAPI u64 k_GetCurrentThread(void) { return (u64)-2; }
 static WINAPI u32 k_GetCurrentThreadId(void) { return cur_th ? cur_th->id : 8; }
 static WINAPI u64 k_CreateEventA(void *sa, int manual, int initial, const void *name) {
@@ -1542,109 +1551,57 @@ static const struct { const char *name; void *fn; } exports2[] = {
 };
 
 /* ---------- loader ---------- */
-#define RD16(p) (*(const u16 *)(p))
-#define RD32(p) (*(const u32 *)(p))
-#define RD64(p) (*(const u64 *)(p))
+#include "wdll.inc"
 
+/* A function of the Win32 layer, by name; NULL if Chamows does not have it. */
+static void *builtin_lookup(const char *name) {
+#define LOOK(t) for (u32 j = 0; j < sizeof t / sizeof t[0]; j++) if (strcmp(t[j].name, name) == 0) return t[j].fn;
+    LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
+#undef LOOK
+    return NULL;
+}
+
+/* The .exe: placed in memory, then its DLLs and imports are linked. */
 static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
-    if (size < 0x200 || f[0] != 'M' || f[1] != 'Z') return "no es un programa .exe";
-    u32 pe = RD32(f + 0x3C);
-    if (pe + 0x108 > size || RD32(f + pe) != 0x4550) return "el archivo .exe está dañado";
-    const u8 *fh = f + pe + 4, *oh = fh + 20;
-    if (RD16(fh) != 0x8664 || RD16(oh) != 0x20B) return "solo se pueden abrir programas de Windows de 64 bits";
-    u16 nsec = RD16(fh + 2), ohsize = RD16(fh + 16);
-    u32 img_size = RD32(oh + 56), hdr_size = RD32(oh + 60), ndirs = RD32(oh + 108);
-    u64 pref_base = RD64(oh + 24);
-    if (img_size > 1024u << 20 || hdr_size > size) return "el programa es demasiado grande";
-    p->raw = kzalloc(img_size + 4096);
-    if (!p->raw) return "no hay memoria suficiente";
-    u8 *img = (u8 *)(((uptr)p->raw + 4095) & ~(uptr)4095);
-    p->image = img;
-    memcpy(img, f, hdr_size);
-    const u8 *sec = oh + ohsize;
-    for (int i = 0; i < nsec; i++, sec += 40) {
-        u32 va = RD32(sec + 12), raw = RD32(sec + 16), ptr = RD32(sec + 20);
-        if (raw > RD32(sec + 8) && RD32(sec + 8)) raw = RD32(sec + 8);
-        if ((u64)va + raw > img_size || (u64)ptr + raw > size) return "una sección del .exe está fuera de su sitio";
-        memcpy(img + va, f + ptr, raw);
-    }
-    const u8 *dir = oh + 112;
-    /* relocations: the program is placed where it fits, not where it asked */
-    i64 delta = (i64)((u64)img - pref_base);
-    if (delta) {
-        if (ndirs < 6 || !RD32(dir + 5 * 8)) return "el .exe no se puede mover en memoria (no tiene tabla de reubicación)";
-        u32 off = RD32(dir + 5 * 8), end = off + RD32(dir + 5 * 8 + 4);
-        while (off + 8 <= end) {
-            u32 page = RD32(img + off), bsize = RD32(img + off + 4);
-            if (bsize < 8) break;
-            for (u32 i = 8; i + 2 <= bsize; i += 2) {
-                u16 e = RD16(img + off + i);
-                u32 at = page + (e & 0xFFF);
-                if (at + 8 > img_size) continue;
-                if ((e >> 12) == 10) *(u64 *)(img + at) += (u64)delta;
-                else if ((e >> 12) == 3) *(u32 *)(img + at) += (u32)delta;
-            }
-            off += bsize;
-        }
-    }
-    /* imports */
-    int unknown = 0;
-    if (ndirs >= 2 && RD32(dir + 8)) {
-        for (u32 d = RD32(dir + 8); d + 20 <= img_size && RD32(img + d + 12); d += 20) {
-            u32 lookup = RD32(img + d) ? RD32(img + d) : RD32(img + d + 16), iat = RD32(img + d + 16);
-            const char *dll = (const char *)img + RD32(img + d + 12);
-            for (u32 k = 0;; k++) {
-                u64 t = RD64(img + lookup + 8 * k);
-                if (!t) break;
-                void *fn = (void *)unknown_import;
-                if (!(t >> 63)) {
-                    const char *name = (const char *)img + (u32)t + 2;
-                    int found = 0;
-                    for (u32 j = 0; j < sizeof exports_files / sizeof exports_files[0]; j++)
-                        if (strcmp(exports_files[j].name, name) == 0) { fn = exports_files[j].fn; found = 1; break; }
-                    for (u32 j = 0; !found && j < sizeof exports_sock / sizeof exports_sock[0]; j++)
-                        if (strcmp(exports_sock[j].name, name) == 0) { fn = exports_sock[j].fn; found = 1; break; }
-                    for (u32 j = 0; !found && j < sizeof exports_gui / sizeof exports_gui[0]; j++)
-                        if (strcmp(exports_gui[j].name, name) == 0) { fn = exports_gui[j].fn; found = 1; break; }
-                    for (u32 j = 0; !found && j < sizeof exports / sizeof exports[0]; j++)
-                        if (strcmp(exports[j].name, name) == 0) { fn = exports[j].fn; found = 1; break; }
-                    for (u32 j = 0; !found && j < sizeof exports2 / sizeof exports2[0]; j++)
-                        if (strcmp(exports2[j].name, name) == 0) { fn = exports2[j].fn; found = 1; }
-                    if (!found) fn = unknown_thunk(name);
-                    if (!found && unknown++ < 12) klog("exe: %s!%s no existe en Chamows (devolverá 0)\n", dll, name);
-                }
-                *(u64 *)(img + iat + 8 * k) = (u64)fn;
-            }
-        }
-    }
-    if (unknown) klog("exe: %d funciones de Windows sin implementar\n", unknown);
-    /* thread-local storage */
-    if (ndirs >= 10 && RD32(dir + 9 * 8)) {
-        const u8 *t = img + RD32(dir + 9 * 8);
-        u64 start = RD64(t), end = RD64(t + 8), idx = RD64(t + 16);
-        u64 len = end > start ? end - start : 0;
-        p->tls_len = len + RD32(t + 32);
-        p->tls_template = kzalloc(p->tls_len + 16);
-        if (len) memcpy(p->tls_template, (void *)start, len);
-        if (idx) *(u32 *)idx = 0;
-        p->tls_cb = RD64(t + 24);
-    }
-    p->entry = (u64)img + RD32(oh + 16);
-    klog("exe: %s cargado en 0x%x (%s)\n", p->name, (u32)(uptr)img, RD16(oh + 68) == 2 ? "ventanas" : "consola");
+    const char *err = NULL;
+    w32mod_t *m = kzalloc(sizeof *m);
+    if (!m) return "no hay memoria suficiente";
+    m->image = pe_map(f, size, &m->raw, &m->size, &err);
+    if (!m->image) { kfree(m); return err; }
+    dll_base(p->name, m->name, sizeof m->name);
+    if (p->exedir[0]) ksnprintf(m->path, sizeof m->path, "%s/%s", p->exedir, p->name);
+    else strncpy0(m->path, p->name, sizeof m->path);
+    m->refs = 1000000;
+    p->exe = m;
+    p->mods = m;
+    p->raw = m->raw;
+    p->image = m->image;
+    if (link_imports(p, m, 0, &err) < 0) return err;
+    tls_setup(p, m);
+    const u8 *oh = opt_header(m->image);
+    p->entry = (u64)m->image + RD32(oh + 16);
+    klog("exe: %s cargado en 0x%x (%s)\n", p->name, (u32)(uptr)m->image, RD16(oh + 68) == 2 ? "ventanas" : "consola");
     return RD16(oh + 68) == 3 ? "consola" : NULL;
 }
 
 static void fiber_main(void) {
     w32proc_t *p = cur;
-    if (p->tls_cb)
-        for (u64 *cb = (u64 *)p->tls_cb; *cb; cb++)
+    /* the DLLs start first (DllMain), then the .exe's TLS callbacks and main */
+    if (mods_init(p, (void *)1) < 0) {
+        notify(p->icon, "No se pudo abrir el programa", "Una de sus DLL no pudo iniciarse.");
+        proc_exit(-1);
+    }
+    if (p->exe->tls_cb)
+        for (u64 *cb = (u64 *)p->exe->tls_cb; *cb; cb++)
             ((void (WINAPI *)(void *, u32, void *))*cb)(p->image, 1, NULL);
     int rc = ((INTFN)p->entry)();
     proc_exit(rc);
 }
 static void thread_main(void) {
     w32thread_t *t = cur_th;
+    mods_thread(t->p, 2); /* DLL_THREAD_ATTACH */
     u32 rc = ((u32 (WINAPI *)(u64))t->start)(t->param);
+    mods_thread(t->p, 3);
     t->exit_code = rc;
     t->done = 1;
     yield(W_RUN);
@@ -1658,9 +1615,12 @@ static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64
     t->p = p;
     t->stack = kmalloc(stack_size);
     t->teb = kzalloc(0x1000);
-    t->tls = kzalloc(p->tls_len + 16);
-    if (!t->stack || !t->teb || !t->tls) { kfree(t->stack); kfree(t->teb); kfree(t->tls); kfree(t); return NULL; }
-    if (p->tls_template) memcpy(t->tls, p->tls_template, p->tls_len);
+    if (!t->stack || !t->teb) { kfree(t->stack); kfree(t->teb); kfree(t); return NULL; }
+    for (int i = 0; i < p->ntls; i++) {
+        t->tlsb[i] = kzalloc(p->tlsm[i].len + 16);
+        if (t->tlsb[i] && p->tlsm[i].tmpl) memcpy(t->tlsb[i], p->tlsm[i].tmpl, p->tlsm[i].len);
+        *(u64 *)(t->teb + 0x800 + 8 * i) = (u64)t->tlsb[i];
+    }
     uptr top = ((uptr)t->stack + stack_size) & ~(uptr)15;
     *(u64 *)(t->teb + 0x08) = top;
     *(u64 *)(t->teb + 0x10) = (u64)t->stack;
@@ -1669,7 +1629,6 @@ static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64
     t->id = next_tid += 4;
     *(u64 *)(t->teb + 0x48) = t->id;
     *(u64 *)(t->teb + 0x58) = (u64)(t->teb + 0x800); /* TLS array */
-    *(u64 *)(t->teb + 0x800) = (u64)t->tls;
     *(u64 *)(t->teb + 0x60) = (u64)p->peb;
     t->rsp = top - 64;
     memset((void *)t->rsp, 0, 64);
@@ -1689,6 +1648,7 @@ int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, 
     if (!p) return -1;
     strncpy0(p->name, name, sizeof p->name);
     strncpy0(p->cwd, pe_dir, sizeof p->cwd);
+    strncpy0(p->exedir, pe_dir, sizeof p->exedir);
     pe_dir[0] = 0;
     /* ScummVM picks OpenGL by default, which Chamows lacks: ask for its software
      * renderer. With no sound card its music never ends and games wait for it
@@ -1723,15 +1683,14 @@ int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, 
     if (err && !console) {
         klog("exe: no se pudo abrir %s: %s\n", name, err);
         notify(icon, "No se pudo abrir el programa", err);
-        kfree(p->raw);
-        kfree(p->tls_template);
+        mods_free(p);
         kfree(p);
         return -1;
     }
     p->peb = kzalloc(0x400);
-    if (!p->peb) { kfree(p->raw); kfree(p); return -1; }
+    if (!p->peb) { mods_free(p); kfree(p); return -1; }
     *(u64 *)(p->peb + 0x10) = (u64)p->image;
-    if (!thread_new(p, fiber_main, 0, 0, 1024 * 1024)) { kfree(p->raw); kfree(p->peb); kfree(p); return -1; }
+    if (!thread_new(p, fiber_main, 0, 0, 1024 * 1024)) { mods_free(p); kfree(p->peb); kfree(p); return -1; }
     if (console) { cur = p; con_open(p); cur = prev; }
     p->next = procs;
     procs = p;
@@ -1747,10 +1706,15 @@ static void proc_free(w32proc_t *p) {
     if (box.p == p) box.p = NULL;
     while (p->blocks) p_free(p->blocks + 1);
     cur = prev;
-    for (w32thread_t *t = p->threads, *n; t; t = n) { n = t->next; kfree(t->stack); kfree(t->teb); kfree(t->tls); kfree(t); }
+    for (w32thread_t *t = p->threads, *n; t; t = n) {
+        n = t->next;
+        for (int i = 0; i < 16; i++) kfree(t->tlsb[i]);
+        kfree(t->stack); kfree(t->teb); kfree(t);
+    }
     p->threads = NULL;
-    kfree(p->raw); kfree(p->peb); kfree(p->tls_template);
-    p->raw = p->peb = p->tls_template = NULL;
+    mods_free(p);
+    kfree(p->peb);
+    p->raw = p->peb = p->image = NULL;
     p->wins = NULL;
     p->cleaned = 1;
     klog("exe: %s terminó (código %d)\n", p->name, p->exit_code);
