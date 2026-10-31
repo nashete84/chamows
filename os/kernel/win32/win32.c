@@ -9,6 +9,7 @@
  * This file is built with SSE allowed, because Windows code uses it. */
 #include "../kernel.h"
 #include "../gui.h"
+#include "../net/net.h"
 
 #ifdef __x86_64__
 #define WINAPI __attribute__((ms_abi))
@@ -1486,6 +1487,7 @@ __attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
 
 #include "wfiles.inc"
 #include "wgui.inc"
+#include "wsock.inc"
 
 static const struct { const char *name; void *fn; } exports2[] = {
     {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
@@ -1600,6 +1602,8 @@ static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
                     int found = 0;
                     for (u32 j = 0; j < sizeof exports_files / sizeof exports_files[0]; j++)
                         if (strcmp(exports_files[j].name, name) == 0) { fn = exports_files[j].fn; found = 1; break; }
+                    for (u32 j = 0; !found && j < sizeof exports_sock / sizeof exports_sock[0]; j++)
+                        if (strcmp(exports_sock[j].name, name) == 0) { fn = exports_sock[j].fn; found = 1; break; }
                     for (u32 j = 0; !found && j < sizeof exports_gui / sizeof exports_gui[0]; j++)
                         if (strcmp(exports_gui[j].name, name) == 0) { fn = exports_gui[j].fn; found = 1; break; }
                     for (u32 j = 0; !found && j < sizeof exports / sizeof exports[0]; j++)
@@ -1737,6 +1741,7 @@ int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, 
 static void proc_free(w32proc_t *p) {
     w32proc_t *prev = cur;
     cur = p;
+    wsock_free(p);
     for (w32win_t *w = p->wins; w; w = w->next)
         if (w->cw) { cw_window *cw = w->cw; w->cw = NULL; w->destroyed = 1; win_close(cw); }
     if (box.p == p) box.p = NULL;
@@ -1791,6 +1796,7 @@ void win32_poll(void) {
                     if (!t->pending) { t->pending = 1; post(p, w, 0x113, t->id, 0); }
                 }
             }
+        wsock_poll(p);
         for (w32thread_t *t = p->threads; t && !p->done; t = t->next) {
             if (t->done || !ready(p, t)) continue;
             cur = p;

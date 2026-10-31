@@ -190,3 +190,11 @@ pequeños desde internet, y una app propia de mensajes.
 - **TCP:** reenvío "vuelta atrás" (go-back-N) con espera que se dobla hasta 8 s, ventana de 64 KB, los datos fuera de orden se descartan y se pide de nuevo. Suficiente para HTTP y para Telegram; no es rápido en redes con pérdidas.
 - **DNS:** el que da DHCP; `red dns <ip>[:puerto]` lo cambia a mano.
 - **Probado en QEMU:** DHCP da 10.0.2.15, `ping 10.0.2.2` responde, `http` descarga una página y un archivo de 1,3 MB completo de un servidor del ordenador anfitrión, `nslookup` resuelve con un servidor DNS de prueba. El DNS público no se pudo probar porque la red de pruebas lo bloquea.
+
+## 23. Winsock (paso 2 hacia Telegram Desktop)
+- **Qué hay:** socket, connect, send/recv, sendto/recvfrom, WSASend/WSARecv, shutdown, ioctlsocket (FIONBIO, FIONREAD), get/setsockopt, select, WSAAsyncSelect, gethostbyname, getaddrinfo/GetAddrInfoW y las conversiones de direcciones. Todo encima de la pila del paso 1.
+- **Bloqueo cooperativo:** una llamada que espera (connect, recv, select) cede el turno con yield en bucle hasta que hay datos o se acaba el tiempo; el escritorio sigue vivo. Rechazado: hilos reales aquí (llegan en el paso 4).
+- **WSAAsyncSelect:** los avisos (FD_CONNECT, FD_READ, FD_WRITE, FD_CLOSE) se envían como mensajes de ventana desde win32_poll. Qt y Telegram usan este modelo o select.
+- **Fin de conexión:** se usa tcp_eof (el otro lado cerró) en vez del estado TCP, porque CLOSE_WAIT todavía parecía "vivo" y FD_CLOSE nunca llegaba.
+- **No hay todavía:** listen/accept (servidor), IPv6, E/S solapada (overlapped/IOCP) y WSAIoctl. La búsqueda DNS detiene el escritorio un momento.
+- **Probado en QEMU:** un .exe de prueba hizo connect con y sin bloqueo, select, gethostbyname y UDP; otro con WSAAsyncSelect recibió FD_CONNECT, FD_READ (289 bytes) y FD_CLOSE contra un servidor HTTP del anfitrión.

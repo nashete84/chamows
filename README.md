@@ -27,6 +27,7 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
   `ejecutar scummvm.exe -p MONKEY --auto-detect`.
 - **Red** (tarjeta Intel e1000): DHCP, DNS, ping y TCP. En la terminal: `red`,
   `ping <equipo>`, `nslookup <nombre>` y `http <equipo[:puerto]> [ruta]`.
+  Los programas .exe tienen Winsock: sockets TCP y UDP, select, WSAAsyncSelect y getaddrinfo.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.
@@ -37,7 +38,7 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
 - Terminal con `ayuda`, `apps`, `instalar <id>`, `desinstalar <id>`, `abrir <id>`,
   `usb`, `dir [carpeta]`, `ejecutar <archivo.exe>`, `mem`, `hora`, `ver`, `cls`, `reiniciar` y `apagar`.
 
-Límites actuales: no hay red (el navegador llega en la siguiente fase) ni disco duro interno, no se admiten hubs USB
+Límites actuales: no hay navegador ni disco duro interno, no se admiten hubs USB
 (los dispositivos van directos al equipo), los nombres de archivo son 8.3 y
 las apps corren con los mismos permisos que el núcleo.
 

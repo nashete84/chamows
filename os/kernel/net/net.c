@@ -192,6 +192,7 @@ int udp_open(u16 port) {
         }
     return -1;
 }
+u32 udp_pending(int s) { return s >= 0 && s < NUDP && udps[s].used ? (u32)udps[s].count : 0; }
 void udp_close(int s) { if (s >= 0 && s < NUDP) udps[s].used = 0; }
 static int udp_out(u16 sport, u32 ip, u16 dport, const void *data, u32 len) {
     u8 seg[1480];
@@ -439,6 +440,7 @@ int tcp_send(int s, const void *data, u32 len) {
     tcp_output(t);
     return (int)n;
 }
+int tcp_eof(int s) { tcb_t *t = T(s); return !t || t->peer_fin; }
 u32 tcp_pending(int s) { tcb_t *t = T(s); return t ? t->rlen : 0; }
 int tcp_recv(int s, void *buf, u32 max) {
     tcb_t *t = T(s);

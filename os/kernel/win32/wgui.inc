@@ -68,6 +68,17 @@ static WINAPI void *g_CreateWindowExW(u32 ex, const u16 *cls, const u16 *title, 
     }
     return win;
 }
+static WINAPI void *g_CreateWindowExA(u32 ex, const char *cls, const char *title, u32 style, int x, int y, int w, int h,
+                                      void *parent, void *menu, void *inst, void *param) {
+    if ((i64)parent == -3) { /* HWND_MESSAGE: same as the wide version */
+        u16 wc[64];
+        if ((uptr)cls >= 0x10000) a2w(cls, wc, 64);
+        return g_CreateWindowExW(ex, (uptr)cls >= 0x10000 ? wc : (const u16 *)cls, NULL, style, x, y, w, h, parent, menu, inst, param);
+    }
+    w32win_t *win = u_CreateWindowExA(ex, cls, title, style, x, y, w, h, parent, menu, inst, param);
+    if (win) { win->style = style; win->exstyle = ex; }
+    return win;
+}
 static WINAPI int g_ShowWindow(void *h, int cmd) {
     w32win_t *w = W(h);
     if (!w) return 0;
@@ -324,7 +335,7 @@ static const struct { const char *name; void *fn; } exports_gui[] = {
     {"DuplicateHandle", g_DuplicateHandle}, {"waveOutOpen", g_no_driver}, {"waveInOpen", g_no_driver},
     {"CoCreateInstance", g_CoCreateInstance},
     {"RegisterClassW", g_RegisterClassW}, {"RegisterClassExW", g_RegisterClassW}, {"GetClassInfoExW", g_GetClassInfoExW},
-    {"UnregisterClassW", k_one}, {"UnregisterClassA", k_one}, {"CreateWindowExW", g_CreateWindowExW},
+    {"UnregisterClassW", k_one}, {"UnregisterClassA", k_one}, {"CreateWindowExW", g_CreateWindowExW}, {"CreateWindowExA", g_CreateWindowExA},
     {"ShowWindow", g_ShowWindow}, {"SetWindowPos", g_SetWindowPos}, {"MoveWindow", g_MoveWindow},
     {"GetWindowLongPtrW", g_GetWindowLongPtrW}, {"SetWindowLongPtrW", g_SetWindowLongPtrW},
     {"GetWindowLongW", g_GetWindowLongPtrW}, {"SetWindowLongW", g_SetWindowLongPtrW},

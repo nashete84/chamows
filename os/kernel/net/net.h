@@ -37,6 +37,7 @@ int udp_open(u16 local_port);                /* socket id, or -1 (port 0 = any) 
 int udp_sendto(int s, u32 ip, u16 port, const void *data, u32 len);
 int udp_recvfrom(int s, void *buf, u32 max, u32 *ip, u16 *port); /* bytes, 0 if nothing yet */
 void udp_close(int s);
+u32 udp_pending(int s);                      /* datagrams waiting */
 
 /* TCP client connections */
 enum { TCP_CLOSED, TCP_SYN_SENT, TCP_ESTABLISHED, TCP_FIN_WAIT, TCP_CLOSE_WAIT, TCP_LAST_ACK, TCP_TIME_WAIT };
@@ -45,6 +46,7 @@ int tcp_state(int s);
 int tcp_send(int s, const void *data, u32 len); /* bytes queued (may be fewer), -1 if closed */
 int tcp_recv(int s, void *buf, u32 max);     /* bytes, 0 if nothing yet, -1 when the peer closed and all was read */
 u32 tcp_pending(int s);                      /* bytes waiting to be read */
+int tcp_eof(int s);                          /* the peer closed (or the connection broke) */
 void tcp_close(int s);                       /* sends FIN; the id is freed when done */
 
 #endif
