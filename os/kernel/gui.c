@@ -235,6 +235,7 @@ static void build_launchers(void) {
     launchers[n_launchers++] = (launcher_t){"pc", "Este equipo", &ICON_PC};
     launchers[n_launchers++] = (launcher_t){"store", "Tienda Chamows", &ICON_STORE};
     launchers[n_launchers++] = (launcher_t){"terminal", "Terminal", &ICON_TERMINAL};
+    launchers[n_launchers++] = (launcher_t){"explorer", "Explorador", &ICON_FOLDER};
     for (int i = 0; i < installed_count() && n_launchers < MAX_LAUNCHERS; i++) {
         installed_app_t *a = installed_get(i);
         launchers[n_launchers++] = (launcher_t){a->entry->id, a->entry->name, &a->icon};
@@ -274,13 +275,13 @@ static int n_tb;
 static void layout_taskbar(void) {
     n_tb = 0;
     tb_items[n_tb++] = (tb_item_t){TB_START, "start", NULL, &ICON_LOGO, {0}};
-    static const char *pins[] = {"store", "terminal"};
-    static const icon_t *pin_icons[] = {&ICON_STORE, &ICON_TERMINAL};
-    for (int i = 0; i < 2; i++) tb_items[n_tb++] = (tb_item_t){TB_PIN, pins[i], NULL, pin_icons[i], {0}};
+    static const char *pins[] = {"explorer", "store", "terminal"};
+    static const icon_t *pin_icons[] = {&ICON_FOLDER, &ICON_STORE, &ICON_TERMINAL};
+    for (int i = 0; i < 3; i++) tb_items[n_tb++] = (tb_item_t){TB_PIN, pins[i], NULL, pin_icons[i], {0}};
     for (cw_window *w = windows; w && n_tb < 24; w = w->next) {
         /* a pinned built-in shows its window on the pin itself */
         int pinned = 0;
-        for (int i = 1; i < 3; i++)
+        for (int i = 1; i < 4; i++)
             if (tb_items[i].icon == w->icon && !tb_items[i].win) { tb_items[i].win = w; pinned = 1; break; }
         if (!pinned) tb_items[n_tb++] = (tb_item_t){TB_WIN, NULL, w, w->icon, {0}};
     }

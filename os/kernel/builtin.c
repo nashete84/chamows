@@ -13,6 +13,7 @@ int launch(const char *id) {
     if (strcmp(id, "store") == 0) { store_open(); return 0; }
     if (strcmp(id, "terminal") == 0) { terminal_open(); return 0; }
     if (strcmp(id, "pc") == 0) { pc_open(); return 0; }
+    if (strcmp(id, "explorer") == 0) { explorer_open(); return 0; }
     installed_app_t *a = installed_find(id);
     if (!a) return -1;
     return app_run(a);
@@ -395,4 +396,5 @@ void pc_open(void) {
 void builtins_refresh(void) {
     if (store_win) store_draw();
     if (pc_win) pc_draw();
+    explorer_refresh();
 }

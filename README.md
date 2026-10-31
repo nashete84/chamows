@@ -21,6 +21,8 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.
+- **Explorador de archivos**: Apps (C:) y pendrive (D:), carpetas, abrir .exe y
+  archivos de texto, crear carpetas y eliminar archivos.
 - Apps: Calculadora, Bloc de notas, Paint, Reloj (con cronómetro), Serpiente y
   Burbujas. Programas .exe: Hola Windows (consola) y el juego Esquiva.
 - Terminal con `ayuda`, `apps`, `instalar <id>`, `desinstalar <id>`, `abrir <id>`,

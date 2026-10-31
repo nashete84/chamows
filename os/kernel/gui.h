@@ -98,6 +98,8 @@ void win32_poll(void);
 void store_open(void);
 void terminal_open(void);
 void pc_open(void);
+void explorer_open(void);
+void explorer_refresh(void);
 extern const icon_t ICON_STORE, ICON_TERMINAL, ICON_PC, ICON_LOGO, ICON_APP, ICON_FOLDER;
 
 /* text helpers for built-ins */

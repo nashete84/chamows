@@ -151,3 +151,20 @@ detrás (igual que el efecto "Mica"). Las apps siguen con su contenido claro.
 
 Se hará en la siguiente fase, en el mismo PR: tarjeta de red e1000, TCP/IP,
 DNS, https con una biblioteca TLS pequeña y un motor de HTML+CSS sin JavaScript.
+
+## 19. Explorador de archivos
+
+**Elegido:** app integrada en el núcleo (`os/kernel/explorer.c`) con tres
+lugares: Este equipo, Apps (C:) y Pendrive (D:). Abre carpetas, ejecuta .exe,
+muestra archivos de texto, crea carpetas (NUEVA, NUEVA2...) y elimina archivos.
+
+**Rechazado por ahora:** renombrar, copiar/pegar y borrar carpetas con
+contenido; necesitan cuadros de texto y operaciones de FAT32 que aún no hay.
+
+## 20. Telegram
+
+Telegram Desktop para Windows es un programa enorme (Qt, cientos de funciones
+de Windows, hilos, red cifrada, OpenGL). El mini Win32 de Chamows no puede
+ejecutarlo, y tampoco Telegram Web, que necesita un navegador con JavaScript
+completo. Lo que sí se puede hacer cuando haya red: descargar e instalar .exe
+pequeños desde internet, y una app propia de mensajes.
