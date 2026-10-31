@@ -181,3 +181,12 @@ pequeños desde internet, y una app propia de mensajes.
 - **Nombres largos al escribir:** el FAT crea alias 8.3 (ARCHIV~1.TXT) con entradas de nombre largo y suma de control; fsck.fat lo da por bueno. C:\Windows y AppData apuntan a C:\CHAMOWS para no llenar la raíz del pendrive.
 - **Funciones que faltan:** cada función de Windows que no existe se anota en el registro la primera vez que el programa la llama, con su nombre; así se ve qué falta sin depurador.
 - **Fase 4 (Monkey Island):** probado con The Secret of Monkey Island (disquetes, 1990): ScummVM lo detecta, la intro y la primera escena se ven y se juega con el ratón. Dos arreglos: `fgetpos`/`fsetpos` (MinGW los usa para moverse dentro de un archivo) y música apagada (`--music-driver=null`), porque sin tarjeta de sonido la música no avanzaba y el juego esperaba a que acabase. Los datos del juego no se guardan en el repositorio.
+
+## 22. Red (paso 1 hacia Telegram Desktop)
+- **Objetivo final de Nacho:** instalar y usar Telegram Desktop. Camino: red → Winsock → cargar DLL → hilos que corren a la vez → más Win32 para Qt → probar el zip portable.
+- **Tarjeta:** Intel e1000 (la que QEMU, VirtualBox y UTM ponen por defecto). Rechazado: virtio-net (más rápida, pero no está en todos los emuladores) y Realtek RTL8139 (más antigua).
+- **Sin interrupciones:** la tarjeta se consulta en cada vuelta del escritorio, igual que el USB. Más sencillo; la latencia es la de una vuelta (unos ms).
+- **Pila propia y pequeña:** Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS y TCP de cliente. Rechazado: portar lwIP (más completa, pero es mucho código ajeno que entender y adaptar). Sin fragmentos IP, sin IPv6, sin servidor TCP todavía.
+- **TCP:** reenvío "vuelta atrás" (go-back-N) con espera que se dobla hasta 8 s, ventana de 64 KB, los datos fuera de orden se descartan y se pide de nuevo. Suficiente para HTTP y para Telegram; no es rápido en redes con pérdidas.
+- **DNS:** el que da DHCP; `red dns <ip>[:puerto]` lo cambia a mano.
+- **Probado en QEMU:** DHCP da 10.0.2.15, `ping 10.0.2.2` responde, `http` descarga una página y un archivo de 1,3 MB completo de un servidor del ordenador anfitrión, `nslookup` resuelve con un servidor DNS de prueba. El DNS público no se pudo probar porque la red de pruebas lo bloquea.

@@ -35,7 +35,7 @@ endif
 KFLAGS  := $(CFLAGS) -fno-pic -fno-pie -Ikernel -Ikernel/arch/$(ARCH) -I$(BUILD)
 AFLAGS  := $(CFLAGS) -fPIE -fvisibility=hidden -Isdk
 
-KSRC    := $(wildcard kernel/*.c) $(wildcard kernel/usb/*.c) $(wildcard kernel/win32/*.c)
+KSRC    := $(wildcard kernel/*.c) $(wildcard kernel/usb/*.c) $(wildcard kernel/win32/*.c) $(wildcard kernel/net/*.c)
 KOBJ    := $(patsubst kernel/%.c,$(BUILD)/k/%.o,$(KSRC)) $(BUILD)/k/boot.o $(BUILD)/k/isr.o $(BUILD)/k/repo.o
 APPS    := calc notepad paint clock snake burbujas
 APPELF  := $(foreach a,$(APPS),$(BUILD)/apps/$(a).elf)
@@ -59,7 +59,7 @@ $(BUILD)/assets.h: build/assets.h
 	@mkdir -p $(BUILD)
 	cp $< $@
 
-$(BUILD)/k/%.o: kernel/%.c kernel/*.h kernel/usb/*.h kernel/arch/$(ARCH)/arch.h sdk/chamows.h $(BUILD)/assets.h
+$(BUILD)/k/%.o: kernel/%.c kernel/*.h kernel/usb/*.h kernel/net/*.h kernel/arch/$(ARCH)/arch.h sdk/chamows.h $(BUILD)/assets.h
 	@mkdir -p $(dir $@)
 	$(CC) $(KFLAGS) -c $< -o $@
 

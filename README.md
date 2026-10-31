@@ -25,6 +25,8 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
   Para probarlo: copia el contenido del zip de ScummVM al pendrive y ejecuta
   `ejecutar scummvm.exe` (QEMU necesita `-m 1024`). Un juego directo:
   `ejecutar scummvm.exe -p MONKEY --auto-detect`.
+- **Red** (tarjeta Intel e1000): DHCP, DNS, ping y TCP. En la terminal: `red`,
+  `ping <equipo>`, `nslookup <nombre>` y `http <equipo[:puerto]> [ruta]`.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.

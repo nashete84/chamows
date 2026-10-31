@@ -1,5 +1,6 @@
 /* Chamows window system: compositor, desktop, taskbar, Start menu, input. */
 #include "gui.h"
+#include "net/net.h"
 #include "usb/usb.h"
 #include "assets.h"
 
@@ -1011,6 +1012,7 @@ void gui_run(void) {
     for (;;) {
         input_event_t ev;
         usb_poll();
+        net_poll();
         while (input_poll(&ev)) {
             if (ev.type == EV_MOUSE) handle_mouse(&ev);
             else if (ev.type == EV_KEY) handle_key(&ev);
