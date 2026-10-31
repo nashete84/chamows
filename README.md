@@ -11,16 +11,22 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
 - **USB** (controlador xHCI): teclados, ratones, tabletas y pendrives.
 - **Pendrive FAT32**: las apps instaladas se guardan en `D:\CHAMOWS\APPS64` y vuelven
   al reiniciar. Sin pendrive viven en memoria.
-- Escritorio con iconos, barra de tareas centrada, menú Inicio con buscador,
-  ventanas que se mueven, minimizan y cierran, notificaciones y reloj.
+- Aspecto moderno ("Windows 12" a nuestra manera): barra de tareas flotante en
+  tres piezas, paneles de vidrio (fondo difuminado), esquinas redondeadas,
+  panel de **Widgets** (reloj, calendario, memoria) y **modo oscuro / claro**.
+- **Programas .exe de Windows** (solo 64 bits): cargador PE propio y un mini
+  Win32 (consola, ventanas, dibujo GDI, temporizadores, MessageBox). Sirve para
+  programas pequeños compilados con MinGW; no abre programas grandes como
+  Office, Steam o Chrome. Desde la Tienda o con `ejecutar JUEGOS\JUEGO.EXE`.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.
-- Apps: Calculadora, Bloc de notas, Paint, Reloj (con cronómetro) y Serpiente.
+- Apps: Calculadora, Bloc de notas, Paint, Reloj (con cronómetro), Serpiente y
+  Burbujas. Programas .exe: Hola Windows (consola) y el juego Esquiva.
 - Terminal con `ayuda`, `apps`, `instalar <id>`, `desinstalar <id>`, `abrir <id>`,
-  `usb`, `dir [carpeta]`, `mem`, `hora`, `ver`, `cls`, `reiniciar` y `apagar`.
+  `usb`, `dir [carpeta]`, `ejecutar <archivo.exe>`, `mem`, `hora`, `ver`, `cls`, `reiniciar` y `apagar`.
 
-Límites actuales: no hay red ni disco duro interno, no se admiten hubs USB
+Límites actuales: no hay red (el navegador llega en la siguiente fase) ni disco duro interno, no se admiten hubs USB
 (los dispositivos van directos al equipo), los nombres de archivo son 8.3 y
 las apps corren con los mismos permisos que el núcleo.
 

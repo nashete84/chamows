@@ -260,6 +260,8 @@ static const char *elf_load(const u8 *file, u32 size, u8 **mem_out, uptr *entry_
 }
 
 int app_run(installed_app_t *a) {
+    if (a->elf_size > 2 && a->elf[0] == 'M' && a->elf[1] == 'Z') /* a Windows .exe */
+        return pe_run(a->elf, a->elf_size, a->entry->name, &a->icon);
     struct app_instance *inst = kzalloc(sizeof *inst);
     if (!inst) return -1;
     uptr entry;

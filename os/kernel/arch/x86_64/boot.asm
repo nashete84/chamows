@@ -56,7 +56,7 @@ _start:
     jne .map
 
     mov eax, cr4
-    or eax, 1 << 5                             ; PAE
+    or eax, (1 << 5) | (1 << 9) | (1 << 10)    ; PAE + SSE (Windows .exe programs use it)
     mov cr4, eax
     mov eax, pml4
     mov cr3, eax
@@ -65,8 +65,10 @@ _start:
     or eax, 1 << 8                             ; long mode enable
     wrmsr
     mov eax, cr0
-    or eax, (1 << 31) | 1                      ; paging + protected mode
+    or eax, (1 << 31) | 1 | 2                  ; paging + protected mode + FPU monitor
+    and eax, ~(1 << 2)                         ; no FPU emulation
     mov cr0, eax
+    fninit
     lgdt [gdt64.ptr]
     jmp 0x08:long_mode
 

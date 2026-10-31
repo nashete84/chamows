@@ -202,6 +202,7 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
                    "  ver                 versión de Chamows\n"
                    "  usb                 dispositivos USB conectados\n"
                    "  dir [carpeta]       archivos del pendrive (D:)\n"
+                   "  ejecutar <archivo>  abre un programa .exe del pendrive\n"
                    "  cls                 limpia la pantalla\n"
                    "  reiniciar | apagar");
     } else if (!strcmp(cmd, "apps")) {
@@ -268,6 +269,24 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
             t_print(t, out);
         }
         if (!n) t_print(t, "  (vacía)");
+    } else if (!strcmp(cmd, "ejecutar") || !strcmp(cmd, "run")) {
+        if (!fat_mounted) { t_print(t, "Copia el .exe a un pendrive FAT32 y conéctalo para ejecutarlo."); return; }
+        char path[64];
+        int k = 0;
+        const char *a = arg;
+        if ((a[0] == 'd' || a[0] == 'D') && a[1] == ':') a += 2;
+        while (*a == '\\' || *a == '/') a++;
+        for (; *a && k < 63; a++) path[k++] = *a == '\\' ? '/' : (*a >= 'a' && *a <= 'z') ? (char)(*a - 32) : *a;
+        path[k] = 0;
+        if (k < 5 || strcmp(path + k - 4, ".EXE") != 0) { t_print(t, "Uso: ejecutar JUEGOS\\PROGRAMA.EXE"); return; }
+        u8 *data;
+        u32 size;
+        if (fat_read(path, &data, &size) != 0) { t_print(t, "No encuentro ese archivo en el pendrive."); return; }
+        const char *name = path;
+        for (const char *q = path; *q; q++) if (*q == '/') name = q + 1;
+        int rc = pe_run(data, size, name, &ICON_APP);
+        kfree(data);
+        t_print(t, rc == 0 ? "Programa abierto." : "No se pudo abrir el programa.");
     } else if (!strcmp(cmd, "cls") || !strcmp(cmd, "clear")) {
         t->n = 0;
     } else if (!strcmp(cmd, "reiniciar")) {

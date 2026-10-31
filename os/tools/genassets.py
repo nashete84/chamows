@@ -89,7 +89,8 @@ def draw_icon(name, size):
         "logo": ("#2aa7ff", "#5b3cf0"), "store": ("#3aa0ff", "#5b3cf0"), "terminal": ("#3b3f4c", "#14161c"),
         "pc": ("#4fb3ff", "#1f6fe5"), "app": ("#9aa3b8", "#5c6478"), "calc": ("#5a6274", "#2b303c"),
         "notepad": ("#4fb3ff", "#1f6fe5"), "paint": ("#ff7aa8", "#c2348a"), "clock": ("#7c8cff", "#3f4fd8"),
-        "snake": ("#a6e34f", "#3f9c2f"), "folder": ("#ffd25c", "#e8a200"),
+        "snake": ("#a6e34f", "#3f9c2f"), "burbujas": ("#ffb36b", "#f0567a"),
+        "exe": ("#6f7c99", "#2f3a55"), "esquiva": ("#3d4a8f", "#120f2e"), "folder": ("#ffd25c", "#e8a200"),
     }
     c1, c2 = defs[name]
     img = tile(size, c1, c2)
@@ -135,6 +136,17 @@ def draw_icon(name, size):
         d.line([(p(.2), p(.7)), (p(.36), p(.7)), (p(.36), p(.44)), (p(.62), p(.44)), (p(.62), p(.3))],
                fill=W, width=int(big * .13), joint="curve")
         d.ellipse([p(.66), p(.62), p(.8), p(.76)], fill=(255, 90, 79, 255))
+    elif name == "burbujas":
+        for (x, y, r, c) in [(.36, .4, .14, W), (.62, .36, .11, (255, 240, 160, 255)), (.52, .64, .16, W)]:
+            d.ellipse([p(x - r), p(y - r), p(x + r), p(y + r)], fill=c)
+    elif name == "exe":
+        d.rounded_rectangle([p(.2), p(.24), p(.8), p(.76)], radius=p(.05), fill=W)
+        d.rectangle([p(.2), p(.24), p(.8), p(.36)], fill=(120, 180, 255, 255))
+        d.polygon([(p(.42), p(.46)), (p(.62), p(.56)), (p(.42), p(.66))], fill=c2)
+    elif name == "esquiva":
+        d.polygon([(p(.5), p(.56)), (p(.62), p(.8)), (p(.38), p(.8))], fill=W)
+        for (x, y, r) in [(.3, .28, .08), (.66, .22, .06), (.56, .44, .07)]:
+            d.ellipse([p(x - r), p(y - r), p(x + r), p(y + r)], fill=(255, 150, 80, 255))
     elif name == "folder":
         d.rounded_rectangle([p(.18), p(.28), p(.82), p(.76)], radius=p(.05), fill=W)
     return finish(img, size)
@@ -166,7 +178,7 @@ def main():
     parts.append("#endif")
     with open(os.path.join(OUT, "assets.h"), "w") as fh:
         fh.write("\n".join(parts) + "\n")
-    for name in ["calc", "notepad", "paint", "clock", "snake"]:
+    for name in ["calc", "notepad", "paint", "clock", "snake", "burbujas", "exe", "esquiva"]:
         raw = bytearray()
         for size in (24, 32, 48):  # all three sizes, one after another
             for r, g, b, a in draw_icon(name, size).getdata():

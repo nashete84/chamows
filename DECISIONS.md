@@ -101,3 +101,53 @@
 - **Descartado:** exFAT y NTFS (más complejos; exFAT tiene patentes hasta hace poco),
   nombres largos (solo se leen como nombre corto 8.3).
 - **Comprobado:** `fsck.fat` no encuentra errores tras instalar y desinstalar apps.
+
+## 15. Programas .exe: cargador PE y mini Win32 propios
+
+**Elegido:** un cargador de archivos PE de 64 bits (`os/kernel/win32/win32.c`)
+que copia el programa a memoria, lo reubica con su tabla `.reloc`, enlaza cada
+función importada por nombre a una versión propia (kernel32, user32, gdi32,
+msvcrt: unas 200) y lo arranca. Cada programa tiene su propia pila y un TEB
+falso en `gs` (el código de arranque de MinGW lo lee). Los programas ceden la
+CPU al esperar un mensaje, dormir o mostrar un MessageBox (multitarea
+cooperativa). Las funciones que no existen devuelven 0 y se anotan en el log.
+
+**Rechazado:**
+- *Portar Wine o ReactOS*: millones de líneas y dependen de Linux o de su
+  propio núcleo; no cabe en un sistema hecho desde cero.
+- *Solo empaquetar las apps de Chamows como .exe*: no ejecuta nada de Windows.
+- *Multitarea con desalojo (hilos de verdad)*: necesita guardar el estado SSE en
+  cada interrupción y separar memoria; se deja para cuando haya modo usuario.
+
+**Consecuencias:** funcionan programas pequeños de consola y de ventanas
+(GDI, temporizadores, doble búfer con BitBlt). No funcionan programas grandes,
+.exe de 32 bits, DirectX, hilos, archivos ni red. Un programa que entra en un
+bucle sin pedir mensajes congela el escritorio. Los .exe solo van en la versión
+de 64 bits; la de 32 bits avisa. Se activa SSE al arrancar porque el código de
+Windows lo usa, y `win32.c` se compila con SSE.
+
+## 16. Juegos
+
+**Elegido:** Burbujas (app nativa) y Esquiva (un .exe de Windows de verdad,
+compilado con MinGW en el CI), ambos originales. Esquiva sirve también de
+prueba del mini Win32.
+
+**Rechazado:** copiar juegos conocidos.
+
+## 17. Aspecto "Windows 12"
+
+**Elegido:** barra de tareas flotante en tres piezas (Widgets, apps, reloj),
+paneles de "vidrio" hechos con una copia difuminada del fondo de pantalla más
+un tinte, esquinas de 10-16 px, panel de Widgets y modo oscuro por defecto con
+interruptor. Diseño y logo propios, sin marcas de Microsoft.
+
+**Rechazado:** difuminar en vivo lo que hay detrás (las ventanas): habría que
+difuminar en cada fotograma, demasiado lento sin tarjeta gráfica.
+
+**Consecuencias:** el vidrio solo deja ver el fondo, no las ventanas que tenga
+detrás (igual que el efecto "Mica"). Las apps siguen con su contenido claro.
+
+## 18. Navegador (pendiente)
+
+Se hará en la siguiente fase, en el mismo PR: tarjeta de red e1000, TCP/IP,
+DNS, https con una biblioteca TLS pequeña y un motor de HTML+CSS sin JavaScript.

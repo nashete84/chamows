@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Instalar herramientas
-        run: sudo apt-get update && sudo apt-get install -y nasm python3-pil fonts-dejavu-core qemu-system-x86 dosfstools
+        run: sudo apt-get update && sudo apt-get install -y nasm python3-pil fonts-dejavu-core qemu-system-x86 dosfstools gcc-mingw-w64-x86-64
       - name: Compilar las dos versiones (64 y 32 bits)
         run: make -C os both
       - name: Arrancar la de 64 bits con USB (teclado, tableta y pendrive)

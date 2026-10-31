@@ -5,7 +5,7 @@
 #include "../sdk/chamows.h"
 
 #define TITLE_H 32
-#define TASKBAR_H 48
+#define TASKBAR_H 56
 
 /* Fonts (defined in gui.c from the generated assets). */
 extern const font_t *FONT_UI, *FONT_BOLD, *FONT_TITLE, *FONT_MONO;
@@ -89,6 +89,10 @@ void apps_collect(void);
 void apps_load_from_disk(void);                   /* reinstalls the apps saved on the pendrive */                           /* frees apps whose windows all closed */
 extern struct app_instance *current_app;
 int app_running(const char *id);
+
+/* ---- Windows programs (win32/win32.c) ---- */
+int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon);
+void win32_poll(void);
 
 /* ---- built-in apps (builtin.c) ---- */
 void store_open(void);

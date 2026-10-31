@@ -14,7 +14,7 @@ typedef unsigned long size_t;
 typedef unsigned long uptr; /* pointer-sized integer */
 #define NULL ((void *)0)
 
-#define CHAMOWS_VERSION "0.4"
+#define CHAMOWS_VERSION "0.5"
 
 /* ---- ports ---- */
 static inline void outb(u16 p, u8 v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(p)); }

@@ -1,0 +1,1292 @@
+/* Chamows: runs Windows programs (.exe, 64-bit PE files).
+ *
+ * The loader copies the program into memory, fixes its addresses and links
+ * every function it imports from Windows DLLs (kernel32, user32, gdi32,
+ * msvcrt) to the small Win32 layer in this file. Each program runs on its own
+ * stack and gives the CPU back whenever it waits for a message, sleeps or
+ * shows a message box, so the desktop keeps working (cooperative multitasking).
+ *
+ * This file is built with SSE allowed, because Windows code uses it. */
+#include "../kernel.h"
+#include "../gui.h"
+
+#ifdef __x86_64__
+#define WINAPI __attribute__((ms_abi))
+typedef i64 (WINAPI *WNDPROC)(void *, u32, u64, i64);
+typedef void (WINAPI *VOIDFN)(void);
+typedef int (WINAPI *INTFN)(void);
+
+/* ---------- process and window state ---------- */
+typedef struct { void *hwnd; u32 message; u64 wparam; i64 lparam; u32 time; i32 ptx, pty; u32 priv; } MSG;
+typedef struct { i32 left, top, right, bottom; } RECT;
+
+enum { K_BRUSH = 1, K_PEN, K_FONT, K_BITMAP };
+typedef struct gobj { int kind; u32 color; int width, font, null; surface_t surf; } gobj_t;
+struct w32win;
+typedef struct { struct w32win *w; gobj_t *brush, *pen, *font, *bmp; u32 text, bk; int bkmode, cx, cy; } dc_t;
+
+typedef struct { u64 id; u32 every, next; int used, pending; } wtimer_t;
+typedef struct w32win {
+    u32 magic;
+    struct w32proc *p;
+    cw_window *cw;
+    WNDPROC proc;
+    u32 bg;              /* class background, 0 = none */
+    int dirty, erase, touched, destroyed;
+    i64 userdata;
+    dc_t dc;
+    wtimer_t timers[8];
+    struct w32win *next;
+} w32win_t;
+#define WIN_MAGIC 0x57494E44
+
+typedef struct { char name[64]; WNDPROC proc; u32 bg; } wclass_t;
+typedef struct blk { struct blk *next, *prev; u64 size, pad; } blk_t;
+
+#define QMAX 128
+#define CON_COLS 80
+#define CON_ROWS 24
+typedef struct w32proc {
+    char name[40];
+    const icon_t *icon;
+    u8 *raw, *image;
+    u64 entry;
+    u8 *stack, *teb, *peb, *tls;
+    uptr rsp;
+    int wait;            /* W_RUN, W_MSG, W_SLEEP, W_BOX */
+    u32 wake_at;
+    int done, killed, cleaned, quit, exit_code;
+    MSG q[QMAX];
+    int qhead, qcount;
+    w32win_t *wins;
+    wclass_t classes[16];
+    int nclasses;
+    blk_t *blocks;
+    u64 tls_cb;          /* address of the TLS callback list, 0 = none */
+    /* console */
+    cw_window *con;
+    char con_text[CON_ROWS][CON_COLS + 1];
+    int con_row, con_col, con_dirty;
+    /* message box */
+    int box_open, box_result;
+    struct w32proc *next;
+} w32proc_t;
+enum { W_RUN, W_MSG, W_SLEEP, W_BOX };
+
+static w32proc_t *procs, *cur;
+static uptr kernel_rsp;
+
+/* ---------- switching stacks ---------- */
+__attribute__((naked)) static void ctx_switch(uptr *save, uptr load) {
+    __asm__ volatile(
+        "push %rbp\n push %rbx\n push %r12\n push %r13\n push %r14\n push %r15\n"
+        "mov %rsp, (%rdi)\n mov %rsi, %rsp\n"
+        "pop %r15\n pop %r14\n pop %r13\n pop %r12\n pop %rbx\n pop %rbp\n ret\n");
+}
+static void set_gs(u64 v) { __asm__ volatile("wrmsr" ::"c"(0xC0000101), "a"((u32)v), "d"((u32)(v >> 32))); }
+
+static void flush_windows(w32proc_t *p) {
+    for (w32win_t *w = p->wins; w; w = w->next)
+        if (w->touched && w->cw) { w->touched = 0; win_invalidate(w->cw); }
+}
+static void yield(int wait) {
+    cur->wait = wait;
+    ctx_switch(&cur->rsp, kernel_rsp);
+}
+static void proc_exit(int code) {
+    cur->exit_code = code;
+    cur->done = 1;
+    yield(W_RUN);
+    for (;;) {}
+}
+
+/* ---------- memory owned by the program (freed when it ends) ---------- */
+static void *p_alloc(u64 n, int zero) {
+    blk_t *b = kmalloc(sizeof *b + n);
+    if (!b) return NULL;
+    b->size = n;
+    b->prev = NULL;
+    b->next = cur->blocks;
+    if (b->next) b->next->prev = b;
+    cur->blocks = b;
+    if (zero) memset(b + 1, 0, n);
+    return b + 1;
+}
+static void p_free(void *ptr) {
+    if (!ptr) return;
+    blk_t *b = (blk_t *)ptr - 1;
+    if (b->prev) b->prev->next = b->next; else cur->blocks = b->next;
+    if (b->next) b->next->prev = b->prev;
+    kfree(b);
+}
+static void *p_realloc(void *ptr, u64 n) {
+    if (!ptr) return p_alloc(n, 0);
+    blk_t *b = (blk_t *)ptr - 1;
+    if (n <= b->size) return ptr;
+    void *q = p_alloc(n, 0);
+    if (q) { memcpy(q, ptr, b->size); p_free(ptr); }
+    return q;
+}
+
+/* ---------- text helpers ---------- */
+static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+static int stricmp_(const char *a, const char *b) {
+    while (*a && lower(*a) == lower(*b)) { a++; b++; }
+    return lower(*a) - lower(*b);
+}
+/* Windows programs write bytes: keep valid UTF-8, read anything else as Latin-1. */
+static void to_utf8(const char *s, int len, char *out, int max) {
+    int o = 0;
+    for (int i = 0; i < len && o < max - 4; i++) {
+        u8 c = (u8)s[i];
+        if (c < 0x80) { out[o++] = (char)c; continue; }
+        int n = (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : 0;
+        int ok = n && i + n < len;
+        for (int k = 1; ok && k <= n; k++) ok = ((u8)s[i + k] & 0xC0) == 0x80;
+        if (ok) { for (int k = 0; k <= n; k++) out[o++] = s[i + k]; i += n; }
+        else { out[o++] = (char)(0xC0 | (c >> 6)); out[o++] = (char)(0x80 | (c & 0x3F)); }
+    }
+    out[o] = 0;
+}
+
+/* printf-style formatting with the Windows variadic convention */
+static int vfmt(char *out, int size, const char *f, __builtin_ms_va_list ap) {
+    int n = 0;
+#define PUT(ch) do { if (n < size - 1) out[n] = (char)(ch); n++; } while (0)
+    for (; *f; f++) {
+        if (*f != '%') { PUT(*f); continue; }
+        f++;
+        int left = 0, zero = 0, plus = 0, width = 0, prec = -1, lng = 0;
+        for (;; f++) {
+            if (*f == '-') left = 1; else if (*f == '0') zero = 1; else if (*f == '+') plus = 1;
+            else if (*f == ' ' || *f == '#') {} else break;
+        }
+        if (*f == '*') { width = __builtin_va_arg(ap, int); f++; }
+        while (*f >= '0' && *f <= '9') width = width * 10 + (*f++ - '0');
+        if (*f == '.') {
+            f++; prec = 0;
+            if (*f == '*') { prec = __builtin_va_arg(ap, int); f++; }
+            while (*f >= '0' && *f <= '9') prec = prec * 10 + (*f++ - '0');
+        }
+        for (;; f++) {
+            if (*f == 'l' || *f == 'z' || *f == 'j' || *f == 't') lng++;
+            else if (*f == 'I' && f[1] == '6' && f[2] == '4') { lng = 2; f += 2; }
+            else if (*f == 'h') {} else break;
+        }
+        char tmp[64];
+        int len = 0, neg = 0;
+        const char *str = tmp;
+        switch (*f) {
+        case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': case 'p': {
+            u64 v;
+            int base = (*f == 'x' || *f == 'X' || *f == 'p') ? 16 : *f == 'o' ? 8 : 10;
+            if (*f == 'p') { v = (u64)__builtin_va_arg(ap, void *); prec = 16; }
+            else if (*f == 'd' || *f == 'i') {
+                i64 s = lng ? __builtin_va_arg(ap, i64) : __builtin_va_arg(ap, int);
+                if (s < 0) { neg = 1; v = (u64)(-s); } else v = (u64)s;
+            } else v = lng ? __builtin_va_arg(ap, u64) : __builtin_va_arg(ap, unsigned);
+            const char *dig = *f == 'X' ? "0123456789ABCDEF" : "0123456789abcdef";
+            char rev[32]; int r = 0;
+            do { rev[r++] = dig[v % (u64)base]; v /= (u64)base; } while (v);
+            while (r < prec && r < 30) rev[r++] = '0';
+            if (neg) tmp[len++] = '-'; else if (plus && (*f == 'd' || *f == 'i')) tmp[len++] = '+';
+            while (r) tmp[len++] = rev[--r];
+            break;
+        }
+        case 'f': case 'F': case 'g': case 'G': case 'e': case 'E': {
+            double d = __builtin_va_arg(ap, double);
+            if (prec < 0) prec = 6;
+            if (prec > 9) prec = 9;
+            if (d < 0) { neg = 1; d = -d; }
+            u64 scale = 1;
+            for (int i = 0; i < prec; i++) scale *= 10;
+            if (d > 1e18) d = 1e18;
+            u64 whole = (u64)d;
+            u64 frac = (u64)((d - (double)whole) * (double)scale + 0.5);
+            if (frac >= scale) { whole++; frac -= scale; }
+            if (neg) tmp[len++] = '-'; else if (plus) tmp[len++] = '+';
+            char rev[24]; int r = 0;
+            do { rev[r++] = (char)('0' + whole % 10); whole /= 10; } while (whole);
+            while (r) tmp[len++] = rev[--r];
+            if (prec) {
+                tmp[len++] = '.';
+                for (int i = prec - 1; i >= 0; i--) { tmp[len + i] = (char)('0' + frac % 10); frac /= 10; }
+                len += prec;
+            }
+            break;
+        }
+        case 'c': tmp[0] = (char)__builtin_va_arg(ap, int); len = 1; break;
+        case 's': {
+            str = __builtin_va_arg(ap, const char *);
+            if (!str) str = "(null)";
+            while (str[len] && (prec < 0 || len < prec)) len++;
+            break;
+        }
+        case '%': tmp[0] = '%'; len = 1; break;
+        case 0: f--; continue;
+        default: tmp[0] = '%'; tmp[1] = *f; len = 2; break;
+        }
+        int pad = width > len ? width - len : 0;
+        if (!left && zero && str == tmp && (tmp[0] == '-' || tmp[0] == '+')) { PUT(tmp[0]); str++; len--; }
+        if (!left) while (pad--) PUT(zero && *f != 's' && *f != 'c' ? '0' : ' ');
+        for (int i = 0; i < len; i++) PUT(str[i]);
+        if (left) while (pad-- > 0) PUT(' ');
+    }
+    if (size > 0) out[n < size ? n : size - 1] = 0;
+#undef PUT
+    return n;
+}
+
+/* ---------- console window (for programs that print text) ---------- */
+static void con_event(cw_window *cw, const cw_event *ev);
+static void con_open(w32proc_t *p) {
+    if (p->con) return;
+    int cwid = text_width(FONT_MONO, "M"), h = FONT_MONO->height;
+    char title[64];
+    ksnprintf(title, sizeof title, "%s - Consola", p->name);
+    p->con = win_create(title, CON_COLS * cwid + 16, CON_ROWS * h + 16, con_event, p, p->icon);
+    p->con_dirty = 1;
+}
+static void con_put(w32proc_t *p, char c) {
+    if (c == '\r') { p->con_col = 0; return; }
+    if (c == '\t') { do con_put(p, ' '); while (p->con_col % 8); return; }
+    if (c == '\n' || p->con_col == CON_COLS) {
+        p->con_col = 0;
+        if (++p->con_row == CON_ROWS) {
+            memmove(p->con_text[0], p->con_text[1], sizeof p->con_text[0] * (CON_ROWS - 1));
+            memset(p->con_text[CON_ROWS - 1], 0, sizeof p->con_text[0]);
+            p->con_row = CON_ROWS - 1;
+        }
+        if (c == '\n') return;
+    }
+    p->con_text[p->con_row][p->con_col++] = c;
+    p->con_dirty = 1;
+}
+static void con_write(const char *s, int n) {
+    w32proc_t *p = cur;
+    if (!p) return;
+    con_open(p);
+    for (int i = 0; i < n; i++) con_put(p, s[i]);
+    p->con_dirty = 1;
+}
+static void con_draw(w32proc_t *p) {
+    if (!p->con || !p->con_dirty) return;
+    p->con_dirty = 0;
+    surface_t *s = &p->con->surf;
+    fill_rect(s, 0, 0, s->w, s->h, 0xFF0C0C12);
+    char line[CON_COLS * 4 + 8];
+    for (int r = 0; r < CON_ROWS; r++) {
+        to_utf8(p->con_text[r], (int)strlen(p->con_text[r]), line, sizeof line);
+        text_draw(s, FONT_MONO, 8, 8 + r * FONT_MONO->height, line, 0xFFE6E6E6);
+    }
+    win_invalidate(p->con);
+}
+static void con_event(cw_window *cw, const cw_event *ev) {
+    w32proc_t *p = cw->user;
+    if (ev->type == CW_CLOSE) { p->con = NULL; if (!p->done) p->killed = 1; }
+}
+
+/* ---------- messages ---------- */
+static void post(w32proc_t *p, void *hwnd, u32 msg, u64 wp, i64 lp) {
+    if (msg == 0x200 && p->qcount) { /* mouse moves: keep only the newest */
+        MSG *last = &p->q[(p->qhead + p->qcount - 1) % QMAX];
+        if (last->message == 0x200 && last->hwnd == hwnd) { last->wparam = wp; last->lparam = lp; return; }
+    }
+    if (p->qcount == QMAX) return;
+    MSG *m = &p->q[(p->qhead + p->qcount++) % QMAX];
+    *m = (MSG){hwnd, msg, wp, lp, ticks_ms, 0, 0, 0};
+}
+static w32win_t *W(void *h) {
+    w32win_t *w = h;
+    if (!w || !cur) return NULL;
+    for (w32win_t *x = cur->wins; x; x = x->next)
+        if (x == w) return w;
+    return NULL;
+}
+
+static int key_to_vk(int k, int *ch) {
+    *ch = 0;
+    switch (k) {
+    case CW_KEY_BACKSPACE: *ch = 8; return 0x08;
+    case CW_KEY_TAB: *ch = 9; return 0x09;
+    case CW_KEY_ENTER: *ch = 13; return 0x0D;
+    case CW_KEY_ESC: *ch = 27; return 0x1B;
+    case CW_KEY_UP: return 0x26;
+    case CW_KEY_DOWN: return 0x28;
+    case CW_KEY_LEFT: return 0x25;
+    case CW_KEY_RIGHT: return 0x27;
+    case CW_KEY_HOME: return 0x24;
+    case CW_KEY_END: return 0x23;
+    case CW_KEY_DELETE: return 0x2E;
+    case CW_KEY_PGUP: return 0x21;
+    case CW_KEY_PGDN: return 0x22;
+    }
+    if (k < 256) *ch = k;
+    if (k >= 'a' && k <= 'z') return k - 32;
+    if ((k >= 'A' && k <= 'Z') || (k >= '0' && k <= '9') || k == ' ') return k;
+    return 0;
+}
+static u32 key_until[256]; /* GetAsyncKeyState: a key counts as held shortly after each press */
+
+static void win_event(cw_window *cw, const cw_event *ev) {
+    w32win_t *w = cw->user;
+    w32proc_t *p = w->p;
+    if (p->done) return;
+    i64 lp = (i64)(((u32)(u16)ev->y << 16) | (u16)ev->x);
+    switch (ev->type) {
+    case CW_MOUSE_DOWN: post(p, w, ev->button == 2 ? 0x204 : 0x201, ev->button == 2 ? 2 : 1, lp); break;
+    case CW_MOUSE_UP: post(p, w, ev->button == 2 ? 0x205 : 0x202, 0, lp); break;
+    case CW_MOUSE_MOVE: post(p, w, 0x200, 0, lp); break;
+    case CW_KEY: {
+        int ch, vk = key_to_vk(ev->key, &ch);
+        if (vk) { post(p, w, 0x100, (u64)vk, 1); key_until[vk] = ticks_ms + 150; }
+        if (ch) post(p, w, 0x102, (u64)(u8)ch, 1);
+        break;
+    }
+    case CW_CLOSE:
+        w->cw = NULL;
+        if (!w->destroyed) post(p, w, 0x10, 0, 0); /* WM_CLOSE */
+        break;
+    }
+}
+
+/* ---------- GDI ---------- */
+static u32 rgb(u32 c) { return 0xFF000000 | (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16 & 0xFF); }
+static u32 syscolor(u64 i) {
+    static const u32 c[] = {0xC8C8C8, 0x3A6EA5, 0x000000, 0x808080, 0xF0F0F0, 0xFFFFFF, 0x646464, 0x000000,
+                            0x000000, 0x000000, 0xB4B4B4, 0xF4F7FC, 0xABABAB, 0x0078D7, 0xFFFFFF, 0xF0F0F0};
+    return 0xFF000000 | c[i & 15];
+}
+static gobj_t stock_obj[20];
+static void stock_init(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    u32 grays[5] = {0xFFFFFFFF, 0xFFC0C0C0, 0xFF808080, 0xFF404040, 0xFF000000};
+    for (int i = 0; i < 5; i++) stock_obj[i] = (gobj_t){K_BRUSH, grays[i], 0, 0, 0, {0}};
+    stock_obj[5] = (gobj_t){K_BRUSH, 0, 0, 0, 1, {0}};
+    stock_obj[6] = (gobj_t){K_PEN, 0xFFFFFFFF, 1, 0, 0, {0}};
+    stock_obj[7] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}};
+    stock_obj[8] = (gobj_t){K_PEN, 0, 1, 0, 1, {0}};
+    for (int i = 10; i <= 17; i++) stock_obj[i] = (gobj_t){K_FONT, 0, 0, CW_FONT_UI, 0, {0}};
+    stock_obj[18] = (gobj_t){K_BRUSH, 0xFFFFFFFF, 0, 0, 0, {0}};
+    stock_obj[19] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}};
+}
+static void dc_init(dc_t *d, w32win_t *w) {
+    stock_init();
+    *d = (dc_t){w, &stock_obj[0], &stock_obj[7], &stock_obj[13], NULL, 0xFF000000, 0xFFFFFFFF, 2, 0, 0};
+}
+static surface_t *dc_surf(dc_t *d) {
+    if (!d) return NULL;
+    if (d->bmp) return &d->bmp->surf;
+    if (d->w && d->w->cw) { d->w->touched = 1; return &d->w->cw->surf; }
+    return NULL;
+}
+static u32 brush_color(u64 h, int *null) {
+    *null = 0;
+    if (h && h < 64) return syscolor(h - 1); /* (HBRUSH)(COLOR_x + 1) */
+    gobj_t *b = (gobj_t *)h;
+    if (!b || b->null) { *null = 1; return 0; }
+    return b->color;
+}
+
+static void fill_ellipse(surface_t *s, int l, int t, int r, int b, u32 c) {
+    double rx = (r - l) / 2.0, ry = (b - t) / 2.0, cx = l + rx, cy = t + ry;
+    if (rx <= 0 || ry <= 0) return;
+    for (int y = t; y < b; y++) {
+        double dy = (y + 0.5 - cy) / ry, k = 1 - dy * dy;
+        if (k <= 0) continue;
+        double hw;
+        __asm__("sqrtsd %1, %0" : "=x"(hw) : "x"(k));
+        hw *= rx;
+        int x0 = (int)(cx - hw + 0.5), x1 = (int)(cx + hw + 0.5);
+        fill_rect(s, x0, y, x1 - x0, 1, c);
+    }
+}
+
+/* ---------- the Win32 functions ---------- */
+/* kernel32 */
+static WINAPI void k_ExitProcess(u32 code) { proc_exit((int)code); }
+static WINAPI void *k_GetModuleHandleA(const char *n) { return n ? NULL : cur->image; }
+static WINAPI const char *k_GetCommandLineA(void) { return cur->name; }
+static WINAPI void k_GetStartupInfoA(u8 *si) { memset(si, 0, 104); *(u32 *)si = 104; }
+static WINAPI u64 k_GetStdHandle(u32 n) { return 0x10 + (u64)(-(i32)n - 10); }
+static WINAPI int k_WriteFile(u64 h, const char *buf, u32 n, u32 *written, void *ov) {
+    if (h == 0x11 || h == 0x12) con_write(buf, (int)n);
+    if (written) *written = n;
+    return 1;
+}
+static WINAPI int k_WriteConsoleA(u64 h, const char *buf, u32 n, u32 *written, void *r) { return k_WriteFile(0x11, buf, n, written, r); }
+static WINAPI u32 k_GetTickCount(void) { return ticks_ms; }
+static WINAPI u64 k_GetTickCount64(void) { return ticks_ms; }
+static WINAPI int k_QPC(i64 *v) { *v = (i64)ticks_ms * 1000; return 1; }
+static WINAPI int k_QPF(i64 *v) { *v = 1000000; return 1; }
+static WINAPI void k_Sleep(u32 ms) {
+    flush_windows(cur);
+    cur->wake_at = ticks_ms + ms;
+    yield(W_SLEEP);
+}
+static WINAPI u32 k_SleepEx(u32 ms, int a) { k_Sleep(ms); return 0; }
+static u32 last_error;
+static WINAPI u32 k_GetLastError(void) { return last_error; }
+static WINAPI void k_SetLastError(u32 e) { last_error = e; }
+static WINAPI int k_one(void) { return 1; }
+static WINAPI u64 k_zero(void) { return 0; }
+static WINAPI int k_VirtualProtect(void *a, u64 n, u32 prot, u32 *old) { if (old) *old = 4; return 1; }
+static WINAPI u64 k_VirtualQuery(u64 a, u8 *mbi, u64 len) {
+    if (len < 48) return 0;
+    memset(mbi, 0, 48);
+    *(u64 *)mbi = a & ~0xFFFULL;
+    *(u64 *)(mbi + 8) = (u64)cur->image;
+    *(u32 *)(mbi + 16) = 4;
+    *(u64 *)(mbi + 24) = 0x1000;
+    *(u32 *)(mbi + 32) = 0x1000;
+    *(u32 *)(mbi + 36) = 4;
+    *(u32 *)(mbi + 40) = 0x1000000;
+    return 48;
+}
+static WINAPI void *k_VirtualAlloc(void *a, u64 n, u32 type, u32 prot) {
+    u8 *m = p_alloc(n + 4096, 1);
+    return m ? (void *)(((uptr)m + 4095) & ~(uptr)4095) : NULL;
+}
+static WINAPI void *k_HeapAlloc(u64 h, u32 flags, u64 n) { return p_alloc(n, (flags & 8) != 0); }
+static WINAPI int k_HeapFree(u64 h, u32 f, void *p) { p_free(p); return 1; }
+static WINAPI void *k_HeapReAlloc(u64 h, u32 f, void *p, u64 n) { return p_realloc(p, n); }
+static WINAPI u32 k_GetCurrentProcessId(void) { return 4; }
+static WINAPI u64 k_GetCurrentProcess(void) { return (u64)-1; }
+static WINAPI void k_GetSystemTimeAsFileTime(u64 *ft) { *ft = 132000000000000000ULL + (u64)ticks_ms * 10000; }
+static WINAPI void k_GetLocalTime(u16 *st) {
+    rtc_time_t t;
+    rtc_read(&t);
+    u16 v[8] = {(u16)t.year, (u16)t.month, 0, (u16)t.day, (u16)t.hour, (u16)t.min, (u16)t.sec, 0};
+    memcpy(st, v, sizeof v);
+}
+static WINAPI void k_OutputDebugStringA(const char *s) { klog("exe: %s\n", s); }
+static u64 tls_slots[64];
+static int tls_next;
+static WINAPI u32 k_TlsAlloc(void) { return tls_next < 64 ? (u32)tls_next++ : 0xFFFFFFFF; }
+static WINAPI u64 k_TlsGetValue(u32 i) { return i < 64 ? tls_slots[i] : 0; }
+static WINAPI int k_TlsSetValue(u32 i, u64 v) { if (i < 64) tls_slots[i] = v; return 1; }
+static WINAPI int k_lstrlenA(const char *s) { return s ? (int)strlen(s) : 0; }
+
+/* user32 */
+static w32win_t *new_win(void) {
+    w32win_t *w = p_alloc(sizeof *w, 1);
+    w->magic = WIN_MAGIC;
+    w->p = cur;
+    dc_init(&w->dc, w);
+    w->next = cur->wins;
+    cur->wins = w;
+    return w;
+}
+static u16 register_class(const char *name, WNDPROC proc, u64 bg) {
+    if (cur->nclasses == 16) return 0;
+    wclass_t *c = &cur->classes[cur->nclasses++];
+    if ((uptr)name < 0x10000) ksnprintf(c->name, sizeof c->name, "#%u", (unsigned)(uptr)name);
+    else strncpy0(c->name, name, sizeof c->name);
+    c->proc = proc;
+    int null;
+    c->bg = bg ? brush_color(bg, &null) : 0;
+    if (bg && null) c->bg = 0;
+    return (u16)(0xC000 + cur->nclasses - 1);
+}
+static WINAPI u16 u_RegisterClassA(const u8 *wc) { return register_class(*(const char **)(wc + 64), *(WNDPROC *)(wc + 8), *(u64 *)(wc + 48)); }
+static WINAPI u16 u_RegisterClassExA(const u8 *wc) { return register_class(*(const char **)(wc + 64), *(WNDPROC *)(wc + 8), *(u64 *)(wc + 48)); }
+static wclass_t *find_class(const char *name) {
+    for (int i = 0; i < cur->nclasses; i++) {
+        if ((uptr)name < 0x10000) { if ((uptr)name == (uptr)(0xC000 + i)) return &cur->classes[i]; }
+        else if (stricmp_(cur->classes[i].name, name) == 0) return &cur->classes[i];
+    }
+    return NULL;
+}
+static WINAPI void *u_CreateWindowExA(u32 ex, const char *cls, const char *title, u32 style, int x, int y, int w, int h,
+                                      void *parent, void *menu, void *inst, void *param) {
+    wclass_t *c = find_class(cls);
+    w32win_t *win = new_win();
+    if (!c || (style & 0x40000000)) { /* unknown class or child control: an invisible window */
+        if (!c) klog("exe: clase de ventana desconocida\n");
+        win->destroyed = 1;
+        return win;
+    }
+    win->proc = c->proc;
+    win->bg = c->bg;
+    int cwid = (w == (int)0x80000000 || w <= 0) ? 640 : w - 16;
+    int chei = (w == (int)0x80000000 || h <= 0 || h == (int)0x80000000) ? 480 : h - 39;
+    cwid = imax(120, imin(cwid, SCREEN_W - 20));
+    chei = imax(60, imin(chei, SCREEN_H - TASKBAR_H - TITLE_H - 20));
+    char t[80];
+    to_utf8(title ? title : "", title ? (int)strlen(title) : 0, t, sizeof t);
+    win->cw = win_create(t, cwid, chei, win_event, win, cur->icon);
+    if (!win->cw) { win->destroyed = 1; return NULL; }
+    if (win->bg) fill_rect(&win->cw->surf, 0, 0, cwid, chei, win->bg);
+    win->dirty = win->erase = 1;
+    u64 cs[10] = {(u64)param};
+    if (win->proc(win, 1, 0, (i64)cs) == -1) { win->destroyed = 1; win_close(win->cw); return NULL; }
+    return win;
+}
+static WINAPI void *u_CreateWindowExW(u32 ex, const u16 *cls, const u16 *title, u32 style, int x, int y, int w, int h,
+                                      void *parent, void *menu, void *inst, void *param) {
+    char c[64], t[80];
+    int i = 0;
+    if ((uptr)cls < 0x10000) return u_CreateWindowExA(ex, (const char *)cls, "", style, x, y, w, h, parent, menu, inst, param);
+    for (; cls[i] && i < 63; i++) c[i] = (char)cls[i];
+    c[i] = 0;
+    for (i = 0; title && title[i] && i < 79; i++) t[i] = (char)title[i];
+    t[i] = 0;
+    return u_CreateWindowExA(ex, c, t, style, x, y, w, h, parent, menu, inst, param);
+}
+static WINAPI int u_ShowWindow(void *h, int cmd) { w32win_t *w = W(h); if (w) w->dirty = 1; return 0; }
+static WINAPI i64 u_DefWindowProcA(void *h, u32 msg, u64 wp, i64 lp);
+static WINAPI int u_UpdateWindow(void *h) {
+    w32win_t *w = W(h);
+    if (w && w->dirty && w->proc && !w->destroyed) w->proc(w, 0xF, 0, 0);
+    return 1;
+}
+static WINAPI int u_DestroyWindow(void *h) {
+    w32win_t *w = W(h);
+    if (!w || w->destroyed) return 0;
+    w->destroyed = 1;
+    if (w->proc) w->proc(w, 2, 0, 0); /* WM_DESTROY */
+    if (w->cw) { cw_window *cw = w->cw; w->cw = NULL; win_close(cw); }
+    return 1;
+}
+static WINAPI void u_PostQuitMessage(int code) { cur->quit = 1; cur->exit_code = code; }
+static WINAPI i64 u_DefWindowProcA(void *h, u32 msg, u64 wp, i64 lp) {
+    w32win_t *w = W(h);
+    if (msg == 0x10) u_DestroyWindow(h);
+    else if (msg == 0xF && w) { w->dirty = 0; w->erase = 0; }
+    return 0;
+}
+static WINAPI int u_PostMessageA(void *h, u32 msg, u64 wp, i64 lp) { post(cur, h, msg, wp, lp); return 1; }
+static WINAPI i64 u_SendMessageA(void *h, u32 msg, u64 wp, i64 lp) {
+    w32win_t *w = W(h);
+    return w && w->proc && !w->destroyed ? w->proc(w, msg, wp, lp) : 0;
+}
+static int pending_paint(MSG *m) {
+    for (w32win_t *w = cur->wins; w; w = w->next)
+        if (w->dirty && !w->destroyed && w->cw) { *m = (MSG){w, 0xF, 0, 0, ticks_ms, 0, 0, 0}; return 1; }
+    return 0;
+}
+static void timer_popped(MSG *m) {
+    w32win_t *w = W(m->hwnd);
+    if (m->message == 0x113 && w)
+        for (int i = 0; i < 8; i++) if (w->timers[i].used && w->timers[i].id == m->wparam) w->timers[i].pending = 0;
+}
+static int next_msg(MSG *m, int remove) {
+    if (cur->qcount) {
+        *m = cur->q[cur->qhead];
+        if (remove) { cur->qhead = (cur->qhead + 1) % QMAX; cur->qcount--; timer_popped(m); }
+        return 1;
+    }
+    if (pending_paint(m)) return 1;
+    if (cur->quit) {
+        *m = (MSG){NULL, 0x12, (u64)cur->exit_code, 0, ticks_ms, 0, 0, 0};
+        if (remove) cur->quit = 0;
+        return 1;
+    }
+    return 0;
+}
+static WINAPI int u_GetMessageA(MSG *m, void *h, u32 a, u32 b) {
+    flush_windows(cur);
+    while (!next_msg(m, 1)) yield(W_MSG);
+    return m->message != 0x12;
+}
+static WINAPI int u_PeekMessageA(MSG *m, void *h, u32 a, u32 b, u32 rm) {
+    if (next_msg(m, rm & 1)) return 1;
+    flush_windows(cur);
+    yield(W_RUN); /* let the desktop run between frames of a busy loop */
+    return 0;
+}
+static WINAPI int u_TranslateMessage(const MSG *m) { return 1; }
+static WINAPI i64 u_DispatchMessageA(const MSG *m) {
+    w32win_t *w = W(m->hwnd);
+    if (m->message == 0x113 && m->lparam) { ((void (WINAPI *)(void *, u32, u64, u32))m->lparam)(m->hwnd, 0x113, m->wparam, ticks_ms); return 0; }
+    if (!w || !w->proc || w->destroyed) return 0;
+    return w->proc(w, m->message, m->wparam, m->lparam);
+}
+static WINAPI void *u_BeginPaint(void *h, u8 *ps) {
+    w32win_t *w = W(h);
+    memset(ps, 0, 72);
+    if (!w) return NULL;
+    if (w->erase && w->bg && w->cw) fill_rect(&w->cw->surf, 0, 0, w->cw->w, w->cw->h, w->bg);
+    w->dirty = w->erase = 0;
+    w->touched = 1;
+    *(void **)ps = &w->dc;
+    RECT *r = (RECT *)(ps + 12);
+    if (w->cw) { r->right = w->cw->w; r->bottom = w->cw->h; }
+    return &w->dc;
+}
+static WINAPI int u_EndPaint(void *h, const void *ps) { w32win_t *w = W(h); if (w) w->touched = 1; return 1; }
+static WINAPI int u_InvalidateRect(void *h, const RECT *r, int erase) {
+    w32win_t *w = W(h);
+    if (w) { w->dirty = 1; w->erase |= erase; }
+    return 1;
+}
+static WINAPI int u_ValidateRect(void *h, const RECT *r) { w32win_t *w = W(h); if (w) w->dirty = 0; return 1; }
+static WINAPI void *u_GetDC(void *h) { w32win_t *w = W(h); return w ? &w->dc : NULL; }
+static WINAPI int u_ReleaseDC(void *h, void *dc) { w32win_t *w = W(h); if (w) w->touched = 1; return 1; }
+static WINAPI int u_GetClientRect(void *h, RECT *r) {
+    w32win_t *w = W(h);
+    *r = (RECT){0, 0, 0, 0};
+    if (w && w->cw) { r->right = w->cw->w; r->bottom = w->cw->h; }
+    return 1;
+}
+static WINAPI int u_AdjustWindowRect(RECT *r, u32 style, int menu) { r->left -= 8; r->right += 8; r->top -= 31; r->bottom += 8; return 1; }
+static WINAPI int u_AdjustWindowRectEx(RECT *r, u32 style, int menu, u32 ex) { return u_AdjustWindowRect(r, style, menu); }
+static WINAPI u64 u_SetTimer(void *h, u64 id, u32 ms, void *fn) {
+    w32win_t *w = W(h);
+    if (!w) return 0;
+    int slot = -1;
+    for (int i = 0; i < 8; i++) if (w->timers[i].used && w->timers[i].id == id) slot = i;
+    for (int i = 0; i < 8 && slot < 0; i++) if (!w->timers[i].used) slot = i;
+    if (slot < 0) return 0;
+    if (ms < 10) ms = 10;
+    w->timers[slot] = (wtimer_t){id, ms, ticks_ms + ms, 1, 0};
+    (void)fn;
+    return id ? id : 1;
+}
+static WINAPI int u_KillTimer(void *h, u64 id) {
+    w32win_t *w = W(h);
+    if (w) for (int i = 0; i < 8; i++) if (w->timers[i].id == id) w->timers[i].used = 0;
+    return 1;
+}
+static WINAPI int u_GetSystemMetrics(int i) { return i == 0 ? SCREEN_W : i == 1 ? SCREEN_H - TASKBAR_H : 0; }
+static WINAPI int u_SetWindowTextA(void *h, const char *t) {
+    w32win_t *w = W(h);
+    if (w && w->cw) { to_utf8(t, (int)strlen(t), w->cw->title, sizeof w->cw->title); invalidate_rect((rect_t){w->cw->x, w->cw->y, w->cw->w, TITLE_H}); }
+    return 1;
+}
+static WINAPI i64 u_GetWindowLongPtrA(void *h, int i) { w32win_t *w = W(h); return w && i == -21 ? w->userdata : 0; }
+static WINAPI i64 u_SetWindowLongPtrA(void *h, int i, i64 v) {
+    w32win_t *w = W(h);
+    if (!w || i != -21) return 0;
+    i64 old = w->userdata;
+    w->userdata = v;
+    return old;
+}
+static WINAPI i16 u_GetAsyncKeyState(int vk) { return vk >= 0 && vk < 256 && (i32)(key_until[vk] - ticks_ms) > 0 ? (i16)0x8000 : 0; }
+static WINAPI int u_IsWindow(void *h) { w32win_t *w = W(h); return w && !w->destroyed; }
+static WINAPI int u_wsprintfA(char *out, const char *f, ...) {
+    __builtin_ms_va_list ap;
+    __builtin_ms_va_start(ap, f);
+    int n = vfmt(out, 1024, f, ap);
+    __builtin_ms_va_end(ap);
+    return n;
+}
+
+/* message box: a small Chamows window; the program waits until it closes */
+typedef struct { w32proc_t *p; char text[400]; int two; const char *b1, *b2; int r1, r2; } box_t;
+static box_t box;
+static void box_draw(cw_window *cw) {
+    surface_t *s = &cw->surf;
+    fill_rect(s, 0, 0, s->w, s->h, 0xFFFFFFFF);
+    int y = 22;
+    char line[200];
+    const char *t = box.text;
+    while (*t && y < s->h - 60) {
+        int n = 0;
+        while (t[n] && t[n] != '\n' && n < 199) n++;
+        memcpy(line, t, (size_t)n);
+        line[n] = 0;
+        text_draw(s, FONT_UI, 24, y, line, 0xFF1B1F2A);
+        y += 20;
+        t += n + (t[n] == '\n');
+    }
+    fill_rect(s, 0, s->h - 52, s->w, 52, 0xFFF3F4F8);
+    draw_button(s, s->w - 104, s->h - 40, 88, 30, box.b1, 1, 0);
+    if (box.two) draw_button(s, s->w - 200, s->h - 40, 88, 30, box.b2, 0, 0);
+    win_invalidate(cw);
+}
+static void box_event(cw_window *cw, const cw_event *ev) {
+    int r = 0;
+    if (!box.p) { if (ev->type != CW_CLOSE) win_close(cw); return; }
+    if (ev->type == CW_MOUSE_DOWN && ev->y >= cw->h - 40 && ev->y < cw->h - 10) {
+        if (ev->x >= cw->w - 104 && ev->x < cw->w - 16) r = box.r1;
+        else if (box.two && ev->x >= cw->w - 200 && ev->x < cw->w - 112) r = box.r2;
+    } else if (ev->type == CW_KEY && (ev->key == CW_KEY_ENTER || ev->key == ' ')) r = box.r1;
+    else if (ev->type == CW_KEY && ev->key == CW_KEY_ESC) r = box.two ? box.r2 : box.r1;
+    else if (ev->type == CW_CLOSE) { if (box.p->box_open) { box.p->box_open = 0; box.p->box_result = box.two ? box.r2 : box.r1; } return; }
+    if (r) { box.p->box_result = r; box.p->box_open = 0; win_close(cw); }
+}
+static WINAPI int u_MessageBoxA(void *h, const char *text, const char *cap, u32 type) {
+    flush_windows(cur);
+    while (box.p && box.p->box_open) yield(W_RUN); /* one message box at a time */
+    to_utf8(text ? text : "", text ? (int)strlen(text) : 0, box.text, sizeof box.text);
+    u32 kind = type & 15;
+    box.p = cur;
+    box.two = kind == 1 || kind == 4;
+    box.b1 = kind == 4 ? "Sí" : "Aceptar";
+    box.b2 = kind == 4 ? "No" : "Cancelar";
+    box.r1 = kind == 4 ? 6 : 1;
+    box.r2 = kind == 4 ? 7 : 2;
+    int lines = 1;
+    for (const char *t = box.text; *t; t++) lines += *t == '\n';
+    int w = 380;
+    for (const char *t = box.text; *t;) {
+        char line[200]; int n = 0;
+        while (t[n] && t[n] != '\n' && n < 199) n++;
+        memcpy(line, t, (size_t)n); line[n] = 0;
+        w = imax(w, text_width(FONT_UI, line) + 48);
+        t += n + (t[n] == '\n');
+    }
+    char c[80];
+    to_utf8(cap ? cap : "Mensaje", cap ? (int)strlen(cap) : 7, c, sizeof c);
+    cw_window *cw = win_create(c, imin(w, SCREEN_W - 40), 96 + lines * 20, box_event, NULL, cur->icon);
+    if (!cw) return box.r1;
+    cur->box_open = 1;
+    box_draw(cw);
+    while (cur->box_open) yield(W_BOX);
+    return cur->box_result;
+}
+
+/* gdi32 */
+static gobj_t *new_obj(int kind, u32 color) {
+    gobj_t *o = p_alloc(sizeof *o, 1);
+    o->kind = kind;
+    o->color = color;
+    return o;
+}
+static WINAPI void *g_GetStockObject(int i) { stock_init(); return i >= 0 && i < 20 ? &stock_obj[i] : NULL; }
+static WINAPI void *g_CreateSolidBrush(u32 c) { return new_obj(K_BRUSH, rgb(c)); }
+static WINAPI void *g_CreatePen(int style, int width, u32 c) {
+    gobj_t *o = new_obj(K_PEN, rgb(c));
+    o->width = width < 1 ? 1 : width;
+    o->null = style == 5;
+    return o;
+}
+static WINAPI void *g_CreateFontA(int h, int w, int e, int o, int weight, u32 it, u32 un, u32 st, u32 cs, u32 op, u32 cp, u32 q, u32 pf, const char *face) {
+    gobj_t *f = new_obj(K_FONT, 0);
+    if (h < 0) h = -h;
+    f->font = h >= 20 ? CW_FONT_TITLE : weight >= 600 ? CW_FONT_BOLD : CW_FONT_UI;
+    return f;
+}
+static WINAPI void *g_SelectObject(dc_t *d, gobj_t *o) {
+    if (!d || !o) return NULL;
+    gobj_t **slot = o->kind == K_BRUSH ? &d->brush : o->kind == K_PEN ? &d->pen : o->kind == K_FONT ? &d->font : &d->bmp;
+    gobj_t *old = *slot;
+    *slot = o;
+    return old;
+}
+static WINAPI int g_DeleteObject(gobj_t *o) {
+    if (!o || (o >= stock_obj && o < stock_obj + 20)) return 1;
+    if (o->kind == K_BITMAP) kfree(o->surf.px);
+    p_free(o);
+    return 1;
+}
+static WINAPI u32 g_SetTextColor(dc_t *d, u32 c) { u32 o = d->text; d->text = rgb(c); return o; }
+static WINAPI u32 g_SetBkColor(dc_t *d, u32 c) { u32 o = d->bk; d->bk = rgb(c); return o; }
+static WINAPI int g_SetBkMode(dc_t *d, int m) { int o = d->bkmode; d->bkmode = m; return o; }
+static WINAPI u32 g_SetDCBrushColor(dc_t *d, u32 c) { stock_obj[18].color = rgb(c); return 0; }
+static WINAPI u32 g_SetDCPenColor(dc_t *d, u32 c) { stock_obj[19].color = rgb(c); return 0; }
+static WINAPI int u_FillRect(dc_t *d, const RECT *r, u64 br) {
+    surface_t *s = dc_surf(d);
+    int null;
+    u32 c = brush_color(br, &null);
+    if (s && !null) fill_rect(s, r->left, r->top, r->right - r->left, r->bottom - r->top, c);
+    return 1;
+}
+static WINAPI int g_Rectangle(dc_t *d, int l, int t, int r, int b) {
+    surface_t *s = dc_surf(d);
+    if (!s) return 0;
+    if (!d->brush->null) fill_rect(s, l, t, r - l, b - t, d->brush->color);
+    if (!d->pen->null) {
+        int k = d->pen->width;
+        u32 c = d->pen->color;
+        fill_rect(s, l, t, r - l, k, c); fill_rect(s, l, b - k, r - l, k, c);
+        fill_rect(s, l, t, k, b - t, c); fill_rect(s, r - k, t, k, b - t, c);
+    }
+    return 1;
+}
+static WINAPI int g_Ellipse(dc_t *d, int l, int t, int r, int b) {
+    surface_t *s = dc_surf(d);
+    if (!s) return 0;
+    int k = d->pen->null ? 0 : d->pen->width;
+    if (k) fill_ellipse(s, l, t, r, b, d->pen->color);
+    if (!d->brush->null) fill_ellipse(s, l + k, t + k, r - k, b - k, d->brush->color);
+    return 1;
+}
+static WINAPI int g_RoundRect(dc_t *d, int l, int t, int r, int b, int w, int h) {
+    surface_t *s = dc_surf(d);
+    if (!s) return 0;
+    int k = d->pen->null ? 0 : d->pen->width;
+    if (k) fill_round(s, l, t, r - l, b - t, w / 2, d->pen->color);
+    if (!d->brush->null) fill_round(s, l + k, t + k, r - l - 2 * k, b - t - 2 * k, imax(0, w / 2 - k), d->brush->color);
+    return 1;
+}
+static WINAPI int g_MoveToEx(dc_t *d, int x, int y, void *old) { d->cx = x; d->cy = y; return 1; }
+static WINAPI int g_LineTo(dc_t *d, int x, int y) {
+    surface_t *s = dc_surf(d);
+    if (s && !d->pen->null) draw_line(s, d->cx, d->cy, x, y, d->pen->width, d->pen->color);
+    d->cx = x; d->cy = y;
+    return 1;
+}
+static WINAPI u32 g_SetPixel(dc_t *d, int x, int y, u32 c) { surface_t *s = dc_surf(d); if (s) fill_rect(s, x, y, 1, 1, rgb(c)); return c; }
+static const font_t *dc_font(dc_t *d) { return font_by_id(d->font ? d->font->font : CW_FONT_UI); }
+static WINAPI int g_TextOutA(dc_t *d, int x, int y, const char *str, int len) {
+    surface_t *s = dc_surf(d);
+    if (!s) return 0;
+    char u[512];
+    to_utf8(str, len, u, sizeof u);
+    const font_t *f = dc_font(d);
+    if (d->bkmode == 2) fill_rect(s, x, y, text_width(f, u), f->height, d->bk);
+    text_draw(s, f, x, y, u, d->text);
+    return 1;
+}
+static WINAPI int g_GetTextExtentPoint32A(dc_t *d, const char *str, int len, i32 *size) {
+    char u[512];
+    to_utf8(str, len, u, sizeof u);
+    size[0] = text_width(dc_font(d), u);
+    size[1] = dc_font(d)->height;
+    return 1;
+}
+static WINAPI int u_DrawTextA(dc_t *d, const char *str, int len, RECT *r, u32 fmt) {
+    char u[512];
+    to_utf8(str, len < 0 ? (int)strlen(str) : len, u, sizeof u);
+    const font_t *f = dc_font(d);
+    int tw = text_width(f, u), th = f->height;
+    if (fmt & 0x400) { r->right = r->left + tw; r->bottom = r->top + th; return th; }
+    int x = r->left, y = r->top;
+    if (fmt & 1) x = (r->left + r->right - tw) / 2; else if (fmt & 2) x = r->right - tw;
+    if (fmt & 4) y = (r->top + r->bottom - th) / 2; else if (fmt & 8) y = r->bottom - th;
+    surface_t *s = dc_surf(d);
+    if (!s) return th;
+    if (d->bkmode == 2) fill_rect(s, x, y, tw, th, d->bk);
+    text_draw(s, f, x, y, u, d->text);
+    return th;
+}
+static WINAPI void *g_CreateCompatibleDC(dc_t *d) {
+    dc_t *n = p_alloc(sizeof *n, 1);
+    dc_init(n, NULL);
+    return n;
+}
+static WINAPI int g_DeleteDC(dc_t *d) { p_free(d); return 1; }
+static WINAPI void *g_CreateCompatibleBitmap(dc_t *d, int w, int h) {
+    gobj_t *b = new_obj(K_BITMAP, 0);
+    w = imax(1, imin(w, 4096)); h = imax(1, imin(h, 4096));
+    u32 *px = kzalloc((size_t)w * (size_t)h * 4);
+    surf_init(&b->surf, px, w, h);
+    fill_rect(&b->surf, 0, 0, w, h, 0xFF000000);
+    return b;
+}
+static WINAPI int g_BitBlt(dc_t *dst, int x, int y, int w, int h, dc_t *src, int sx, int sy, u32 rop) {
+    surface_t *d = dc_surf(dst), *s = dc_surf(src);
+    if (!d) return 0;
+    if (rop == 0x42) { fill_rect(d, x, y, w, h, 0xFF000000); return 1; }      /* BLACKNESS */
+    if (rop == 0xFF0062) { fill_rect(d, x, y, w, h, 0xFFFFFFFF); return 1; }  /* WHITENESS */
+    if (s) blit(d, s, sx, sy, w, h, x, y);
+    return 1;
+}
+static WINAPI int u_MessageBeep(u32 t) { return 1; }
+
+/* msvcrt */
+typedef struct { u8 pad[48]; } FILE_;
+static FILE_ iob[3];
+static int fmode, commode, errno_;
+static VOIDFN atexit_fns[32];
+static int n_atexit;
+static char *argv0[2];
+static char *envp0[1];
+static int out_file(void *f) { return f == &iob[1] || f == &iob[2]; }
+static WINAPI void *c___iob_func(void) { return iob; }
+static WINAPI void *c___acrt_iob_func(u32 i) { return &iob[i < 3 ? i : 1]; }
+static WINAPI int c___getmainargs(int *argc, char ***argv, char ***env, int glob, void *si) {
+    argv0[0] = cur->name;
+    *argc = 1; *argv = argv0; *env = envp0;
+    return 0;
+}
+static WINAPI int *c___p__fmode(void) { return &fmode; }
+static WINAPI int *c___p__commode(void) { return &commode; }
+static WINAPI int *c__errno(void) { return &errno_; }
+static WINAPI void c__initterm(VOIDFN *a, VOIDFN *b) { for (; a < b; a++) if (*a) (*a)(); }
+static WINAPI int c__initterm_e(INTFN *a, INTFN *b) { for (; a < b; a++) if (*a) { int r = (*a)(); if (r) return r; } return 0; }
+static WINAPI void c_exit(int code) {
+    while (n_atexit) atexit_fns[--n_atexit]();
+    proc_exit(code);
+}
+static WINAPI void c__exit(int code) { proc_exit(code); }
+static WINAPI void c_abort(void) { klog("exe: el programa llamó a abort()\n"); proc_exit(3); }
+static WINAPI void c__amsg_exit(int n) { klog("exe: error interno del programa (%d)\n", n); proc_exit(255); }
+static WINAPI int c_atexit(VOIDFN f) { if (n_atexit < 32) atexit_fns[n_atexit++] = f; return 0; }
+static WINAPI void *c__onexit(VOIDFN f) { c_atexit(f); return (void *)f; }
+static WINAPI void *c_malloc(u64 n) { return p_alloc(n ? n : 1, 0); }
+static WINAPI void *c_calloc(u64 a, u64 b) { u64 n = a * b; return p_alloc(n ? n : 1, 1); }
+static WINAPI void *c_realloc(void *p, u64 n) { return p_realloc(p, n); }
+static WINAPI void c_free(void *p) { p_free(p); }
+static WINAPI void *c_memcpy(void *d, const void *s, u64 n) { return memcpy(d, s, n); }
+static WINAPI void *c_memmove(void *d, const void *s, u64 n) { return memmove(d, s, n); }
+static WINAPI void *c_memset(void *d, int c, u64 n) { return memset(d, c, n); }
+static WINAPI int c_memcmp(const void *a, const void *b, u64 n) {
+    const u8 *x = a, *y = b;
+    for (u64 i = 0; i < n; i++) if (x[i] != y[i]) return x[i] - y[i];
+    return 0;
+}
+static WINAPI u64 c_strlen(const char *s) { return strlen(s); }
+static WINAPI int c_strcmp(const char *a, const char *b) { return strcmp(a, b); }
+static WINAPI int c_strncmp(const char *a, const char *b, u64 n) {
+    for (; n && *a && *a == *b; n--) { a++; b++; }
+    return n ? (u8)*a - (u8)*b : 0;
+}
+static WINAPI char *c_strcpy(char *d, const char *s) { char *r = d; while ((*d++ = *s++)) {} return r; }
+static WINAPI char *c_strncpy(char *d, const char *s, u64 n) { u64 i = 0; for (; i < n && s[i]; i++) d[i] = s[i]; for (; i < n; i++) d[i] = 0; return d; }
+static WINAPI char *c_strcat(char *d, const char *s) { c_strcpy(d + strlen(d), s); return d; }
+static WINAPI char *c_strchr(const char *s, int c) { for (;; s++) { if (*s == (char)c) return (char *)s; if (!*s) return NULL; } }
+static WINAPI char *c_strrchr(const char *s, int c) { const char *r = NULL; for (;; s++) { if (*s == (char)c) r = s; if (!*s) return (char *)r; } }
+static WINAPI int c_atoi(const char *s) {
+    int n = 0, neg = 0;
+    while (*s == ' ') s++;
+    if (*s == '-' || *s == '+') neg = *s++ == '-';
+    while (*s >= '0' && *s <= '9') n = n * 10 + (*s++ - '0');
+    return neg ? -n : n;
+}
+static WINAPI int c_abs(int v) { return v < 0 ? -v : v; }
+static u32 seed = 1;
+static WINAPI void c_srand(u32 s) { seed = s; }
+static WINAPI int c_rand(void) { seed = seed * 214013 + 2531011; return (int)(seed >> 16 & 0x7FFF); }
+static WINAPI i64 c_time(i64 *t) {
+    rtc_time_t r;
+    rtc_read(&r);
+    static const int mdays[] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+    i64 days = (r.year - 1970) * 365 + (r.year - 1969) / 4 + mdays[(r.month - 1) % 12] + r.day - 1 + (r.month > 2 && r.year % 4 == 0);
+    i64 v = days * 86400 + r.hour * 3600 + r.min * 60 + r.sec;
+    if (t) *t = v;
+    return v;
+}
+static WINAPI i32 c_clock(void) { return (i32)ticks_ms; }
+static WINAPI int c_puts(const char *s) { con_write(s, (int)strlen(s)); con_write("\n", 1); return 0; }
+static WINAPI int c_putchar(int c) { char ch = (char)c; con_write(&ch, 1); return c; }
+static WINAPI int c_fputs(const char *s, void *f) { if (out_file(f)) con_write(s, (int)strlen(s)); return 0; }
+static WINAPI int c_fputc(int c, void *f) { char ch = (char)c; if (out_file(f)) con_write(&ch, 1); return c; }
+static WINAPI u64 c_fwrite(const void *b, u64 sz, u64 n, void *f) { if (out_file(f)) con_write(b, (int)(sz * n)); return n; }
+static WINAPI int c_fflush(void *f) { return 0; }
+static WINAPI int c_vprintf(const char *f, __builtin_ms_va_list ap) {
+    char buf[1024];
+    int n = vfmt(buf, sizeof buf, f, ap);
+    con_write(buf, imin(n, (int)sizeof buf - 1));
+    return n;
+}
+static WINAPI int c_printf(const char *f, ...) {
+    __builtin_ms_va_list ap;
+    __builtin_ms_va_start(ap, f);
+    int n = c_vprintf(f, ap);
+    __builtin_ms_va_end(ap);
+    return n;
+}
+static WINAPI int c_vfprintf(void *fp, const char *f, __builtin_ms_va_list ap) {
+    char buf[1024];
+    int n = vfmt(buf, sizeof buf, f, ap);
+    if (out_file(fp)) con_write(buf, imin(n, (int)sizeof buf - 1));
+    return n;
+}
+static WINAPI int c_fprintf(void *fp, const char *f, ...) {
+    __builtin_ms_va_list ap;
+    __builtin_ms_va_start(ap, f);
+    int n = c_vfprintf(fp, f, ap);
+    __builtin_ms_va_end(ap);
+    return n;
+}
+static WINAPI int c_sprintf(char *out, const char *f, ...) {
+    __builtin_ms_va_list ap;
+    __builtin_ms_va_start(ap, f);
+    int n = vfmt(out, 1 << 20, f, ap);
+    __builtin_ms_va_end(ap);
+    return n;
+}
+static WINAPI int c_snprintf(char *out, u64 size, const char *f, ...) {
+    __builtin_ms_va_list ap;
+    __builtin_ms_va_start(ap, f);
+    int n = vfmt(out, (int)size, f, ap);
+    __builtin_ms_va_end(ap);
+    return n;
+}
+static WINAPI int c_vsnprintf(char *out, u64 size, const char *f, __builtin_ms_va_list ap) { return vfmt(out, (int)size, f, ap); }
+static WINAPI int c_vsprintf(char *out, const char *f, __builtin_ms_va_list ap) { return vfmt(out, 1 << 20, f, ap); }
+static WINAPI double c_sqrt(double x) { double r; __asm__("sqrtsd %1, %0" : "=x"(r) : "x"(x)); return r; }
+static WINAPI double c_fabs(double x) { return x < 0 ? -x : x; }
+static WINAPI double c_floor(double x) { double t = (double)(i64)x; return t > x ? t - 1 : t; }
+static WINAPI double c_ceil(double x) { double t = (double)(i64)x; return t < x ? t + 1 : t; }
+static WINAPI double c_sin(double x) { double r; __asm__("fsin" : "=t"(r) : "0"(x)); return r; }
+static WINAPI double c_cos(double x) { double r; __asm__("fcos" : "=t"(r) : "0"(x)); return r; }
+static WINAPI void *c_signal(int s, void *h) { return NULL; }
+
+static WINAPI int c_one_mb(void) { return 1; }
+static struct { const char *dp, *ts, *grp; } lconv_ = {".", "", ""};
+static WINAPI void *c_localeconv(void) { return &lconv_; }
+static WINAPI const char *c_strerror(int e) { return "error"; }
+static WINAPI u64 c_wcslen(const u16 *s) { u64 n = 0; while (s[n]) n++; return n; }
+static char *acmdln = "programa.exe";
+
+static WINAPI u64 unknown_import(void) { return 0; }
+
+static const struct { const char *name; void *fn; } exports[] = {
+    /* kernel32 */
+    {"ExitProcess", k_ExitProcess}, {"GetModuleHandleA", k_GetModuleHandleA}, {"GetModuleHandleW", k_GetModuleHandleA},
+    {"GetCommandLineA", k_GetCommandLineA}, {"GetStartupInfoA", k_GetStartupInfoA}, {"GetStdHandle", k_GetStdHandle},
+    {"WriteFile", k_WriteFile}, {"WriteConsoleA", k_WriteConsoleA}, {"GetTickCount", k_GetTickCount},
+    {"GetTickCount64", k_GetTickCount64}, {"QueryPerformanceCounter", k_QPC}, {"QueryPerformanceFrequency", k_QPF},
+    {"Sleep", k_Sleep}, {"SleepEx", k_SleepEx}, {"GetLastError", k_GetLastError}, {"SetLastError", k_SetLastError},
+    {"SetUnhandledExceptionFilter", k_zero}, {"InitializeCriticalSection", k_zero}, {"EnterCriticalSection", k_zero},
+    {"LeaveCriticalSection", k_zero}, {"DeleteCriticalSection", k_zero}, {"InitializeCriticalSectionAndSpinCount", k_one},
+    {"VirtualProtect", k_VirtualProtect}, {"VirtualQuery", k_VirtualQuery}, {"VirtualAlloc", k_VirtualAlloc},
+    {"VirtualFree", k_one}, {"GetProcessHeap", k_one}, {"HeapAlloc", k_HeapAlloc}, {"HeapFree", k_HeapFree},
+    {"HeapReAlloc", k_HeapReAlloc}, {"GetCurrentProcessId", k_GetCurrentProcessId}, {"GetCurrentThreadId", k_GetCurrentProcessId},
+    {"GetCurrentProcess", k_GetCurrentProcess}, {"GetSystemTimeAsFileTime", k_GetSystemTimeAsFileTime},
+    {"GetLocalTime", k_GetLocalTime}, {"GetSystemTime", k_GetLocalTime}, {"OutputDebugStringA", k_OutputDebugStringA},
+    {"TlsAlloc", k_TlsAlloc}, {"TlsGetValue", k_TlsGetValue}, {"TlsSetValue", k_TlsSetValue}, {"TlsFree", k_one},
+    {"IsDebuggerPresent", k_zero}, {"lstrlenA", k_lstrlenA}, {"FreeConsole", k_one}, {"AllocConsole", k_one},
+    {"SetConsoleTitleA", k_one}, {"SetConsoleOutputCP", k_one}, {"SetConsoleCP", k_one}, {"GetConsoleMode", k_one},
+    /* user32 */
+    {"RegisterClassA", u_RegisterClassA}, {"RegisterClassExA", u_RegisterClassExA}, {"RegisterClassW", u_RegisterClassA},
+    {"RegisterClassExW", u_RegisterClassExA}, {"CreateWindowExA", u_CreateWindowExA}, {"CreateWindowExW", u_CreateWindowExW},
+    {"ShowWindow", u_ShowWindow}, {"UpdateWindow", u_UpdateWindow}, {"DestroyWindow", u_DestroyWindow},
+    {"PostQuitMessage", u_PostQuitMessage}, {"DefWindowProcA", u_DefWindowProcA}, {"DefWindowProcW", u_DefWindowProcA},
+    {"PostMessageA", u_PostMessageA}, {"SendMessageA", u_SendMessageA}, {"GetMessageA", u_GetMessageA},
+    {"GetMessageW", u_GetMessageA}, {"PeekMessageA", u_PeekMessageA}, {"PeekMessageW", u_PeekMessageA},
+    {"TranslateMessage", u_TranslateMessage}, {"DispatchMessageA", u_DispatchMessageA}, {"DispatchMessageW", u_DispatchMessageA},
+    {"BeginPaint", u_BeginPaint}, {"EndPaint", u_EndPaint}, {"InvalidateRect", u_InvalidateRect}, {"ValidateRect", u_ValidateRect},
+    {"GetDC", u_GetDC}, {"ReleaseDC", u_ReleaseDC}, {"GetClientRect", u_GetClientRect}, {"AdjustWindowRect", u_AdjustWindowRect},
+    {"AdjustWindowRectEx", u_AdjustWindowRectEx}, {"SetTimer", u_SetTimer}, {"KillTimer", u_KillTimer},
+    {"GetSystemMetrics", u_GetSystemMetrics}, {"SetWindowTextA", u_SetWindowTextA}, {"GetWindowLongPtrA", u_GetWindowLongPtrA},
+    {"SetWindowLongPtrA", u_SetWindowLongPtrA}, {"GetAsyncKeyState", u_GetAsyncKeyState}, {"GetKeyState", u_GetAsyncKeyState},
+    {"IsWindow", u_IsWindow}, {"wsprintfA", u_wsprintfA}, {"MessageBoxA", u_MessageBoxA}, {"MessageBeep", u_MessageBeep},
+    {"FillRect", u_FillRect}, {"DrawTextA", u_DrawTextA}, {"LoadCursorA", k_one}, {"LoadCursorW", k_one}, {"LoadIconA", k_one},
+    {"LoadIconW", k_one}, {"SetCursor", k_zero}, {"ShowCursor", k_zero}, {"SetFocus", k_zero}, {"SetForegroundWindow", k_one},
+    /* gdi32 */
+    {"GetStockObject", g_GetStockObject}, {"CreateSolidBrush", g_CreateSolidBrush}, {"CreatePen", g_CreatePen},
+    {"CreateFontA", g_CreateFontA}, {"SelectObject", g_SelectObject}, {"DeleteObject", g_DeleteObject},
+    {"SetTextColor", g_SetTextColor}, {"SetBkColor", g_SetBkColor}, {"SetBkMode", g_SetBkMode},
+    {"SetDCBrushColor", g_SetDCBrushColor}, {"SetDCPenColor", g_SetDCPenColor}, {"Rectangle", g_Rectangle},
+    {"Ellipse", g_Ellipse}, {"RoundRect", g_RoundRect}, {"MoveToEx", g_MoveToEx}, {"LineTo", g_LineTo},
+    {"SetPixel", g_SetPixel}, {"TextOutA", g_TextOutA}, {"GetTextExtentPoint32A", g_GetTextExtentPoint32A},
+    {"CreateCompatibleDC", g_CreateCompatibleDC}, {"DeleteDC", g_DeleteDC}, {"CreateCompatibleBitmap", g_CreateCompatibleBitmap},
+    {"BitBlt", g_BitBlt},
+    /* msvcrt */
+    {"__iob_func", c___iob_func}, {"__acrt_iob_func", c___acrt_iob_func}, {"__getmainargs", c___getmainargs},
+    {"__set_app_type", k_zero}, {"__p__fmode", c___p__fmode}, {"__p__commode", c___p__commode}, {"_errno", c__errno},
+    {"_initterm", c__initterm}, {"_initterm_e", c__initterm_e}, {"exit", c_exit}, {"_exit", c__exit}, {"_cexit", k_zero},
+    {"abort", c_abort}, {"_amsg_exit", c__amsg_exit}, {"atexit", c_atexit}, {"_onexit", c__onexit},
+    {"__setusermatherr", k_zero}, {"__lconv_init", k_zero}, {"_lock", k_zero}, {"_unlock", k_zero}, {"_fpreset", k_zero},
+    {"signal", c_signal}, {"_set_invalid_parameter_handler", k_zero}, {"_setmode", k_zero},
+    {"malloc", c_malloc}, {"calloc", c_calloc}, {"realloc", c_realloc}, {"free", c_free},
+    {"memcpy", c_memcpy}, {"memmove", c_memmove}, {"memset", c_memset}, {"memcmp", c_memcmp},
+    {"strlen", c_strlen}, {"strcmp", c_strcmp}, {"strncmp", c_strncmp}, {"strcpy", c_strcpy}, {"strncpy", c_strncpy},
+    {"strcat", c_strcat}, {"strchr", c_strchr}, {"strrchr", c_strrchr}, {"atoi", c_atoi}, {"abs", c_abs},
+    {"srand", c_srand}, {"rand", c_rand}, {"time", c_time}, {"_time64", c_time}, {"clock", c_clock},
+    {"puts", c_puts}, {"putchar", c_putchar}, {"fputs", c_fputs}, {"fputc", c_fputc}, {"fwrite", c_fwrite},
+    {"fflush", c_fflush}, {"printf", c_printf}, {"vprintf", c_vprintf}, {"fprintf", c_fprintf}, {"vfprintf", c_vfprintf},
+    {"sprintf", c_sprintf}, {"snprintf", c_snprintf}, {"_snprintf", c_snprintf}, {"_vsnprintf", c_vsnprintf},
+    {"vsnprintf", c_vsnprintf}, {"vsprintf", c_vsprintf}, {"sqrt", c_sqrt}, {"fabs", c_fabs}, {"floor", c_floor},
+    {"ceil", c_ceil}, {"sin", c_sin}, {"cos", c_cos}, {"___mb_cur_max_func", c_one_mb}, {"___lc_codepage_func", k_zero},
+    {"_ismbblead", k_zero}, {"IsDBCSLeadByteEx", k_zero}, {"MultiByteToWideChar", k_zero}, {"WideCharToMultiByte", k_zero},
+    {"localeconv", c_localeconv}, {"strerror", c_strerror}, {"wcslen", c_wcslen}, {"__C_specific_handler", k_zero},
+    /* variables (the program reads them through the import table) */
+    {"_fmode", &fmode}, {"_commode", &commode}, {"__initenv", &envp0}, {"_acmdln", &acmdln},
+};
+
+/* ---------- loader ---------- */
+#define RD16(p) (*(const u16 *)(p))
+#define RD32(p) (*(const u32 *)(p))
+#define RD64(p) (*(const u64 *)(p))
+
+static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
+    if (size < 0x200 || f[0] != 'M' || f[1] != 'Z') return "no es un programa .exe";
+    u32 pe = RD32(f + 0x3C);
+    if (pe + 0x108 > size || RD32(f + pe) != 0x4550) return "el archivo .exe está dañado";
+    const u8 *fh = f + pe + 4, *oh = fh + 20;
+    if (RD16(fh) != 0x8664 || RD16(oh) != 0x20B) return "solo se pueden abrir programas de Windows de 64 bits";
+    u16 nsec = RD16(fh + 2), ohsize = RD16(fh + 16);
+    u32 img_size = RD32(oh + 56), hdr_size = RD32(oh + 60), ndirs = RD32(oh + 108);
+    u64 pref_base = RD64(oh + 24);
+    if (img_size > 64u << 20 || hdr_size > size) return "el programa es demasiado grande";
+    p->raw = kzalloc(img_size + 4096);
+    if (!p->raw) return "no hay memoria suficiente";
+    u8 *img = (u8 *)(((uptr)p->raw + 4095) & ~(uptr)4095);
+    p->image = img;
+    memcpy(img, f, hdr_size);
+    const u8 *sec = oh + ohsize;
+    for (int i = 0; i < nsec; i++, sec += 40) {
+        u32 va = RD32(sec + 12), raw = RD32(sec + 16), ptr = RD32(sec + 20);
+        if (raw > RD32(sec + 8) && RD32(sec + 8)) raw = RD32(sec + 8);
+        if ((u64)va + raw > img_size || (u64)ptr + raw > size) return "una sección del .exe está fuera de su sitio";
+        memcpy(img + va, f + ptr, raw);
+    }
+    const u8 *dir = oh + 112;
+    /* relocations: the program is placed where it fits, not where it asked */
+    i64 delta = (i64)((u64)img - pref_base);
+    if (delta) {
+        if (ndirs < 6 || !RD32(dir + 5 * 8)) return "el .exe no se puede mover en memoria (no tiene tabla de reubicación)";
+        u32 off = RD32(dir + 5 * 8), end = off + RD32(dir + 5 * 8 + 4);
+        while (off + 8 <= end) {
+            u32 page = RD32(img + off), bsize = RD32(img + off + 4);
+            if (bsize < 8) break;
+            for (u32 i = 8; i + 2 <= bsize; i += 2) {
+                u16 e = RD16(img + off + i);
+                u32 at = page + (e & 0xFFF);
+                if (at + 8 > img_size) continue;
+                if ((e >> 12) == 10) *(u64 *)(img + at) += (u64)delta;
+                else if ((e >> 12) == 3) *(u32 *)(img + at) += (u32)delta;
+            }
+            off += bsize;
+        }
+    }
+    /* imports */
+    int unknown = 0;
+    if (ndirs >= 2 && RD32(dir + 8)) {
+        for (u32 d = RD32(dir + 8); d + 20 <= img_size && RD32(img + d + 12); d += 20) {
+            u32 lookup = RD32(img + d) ? RD32(img + d) : RD32(img + d + 16), iat = RD32(img + d + 16);
+            const char *dll = (const char *)img + RD32(img + d + 12);
+            for (u32 k = 0;; k++) {
+                u64 t = RD64(img + lookup + 8 * k);
+                if (!t) break;
+                void *fn = (void *)unknown_import;
+                if (!(t >> 63)) {
+                    const char *name = (const char *)img + (u32)t + 2;
+                    int found = 0;
+                    for (u32 j = 0; j < sizeof exports / sizeof exports[0]; j++)
+                        if (strcmp(exports[j].name, name) == 0) { fn = exports[j].fn; found = 1; break; }
+                    if (!found && unknown++ < 12) klog("exe: %s!%s no existe en Chamows (devolverá 0)\n", dll, name);
+                }
+                *(u64 *)(img + iat + 8 * k) = (u64)fn;
+            }
+        }
+    }
+    if (unknown) klog("exe: %d funciones de Windows sin implementar\n", unknown);
+    /* thread-local storage */
+    if (ndirs >= 10 && RD32(dir + 9 * 8)) {
+        const u8 *t = img + RD32(dir + 9 * 8);
+        u64 start = RD64(t), end = RD64(t + 8), idx = RD64(t + 16);
+        u64 len = end > start ? end - start : 0;
+        p->tls = kzalloc(len + RD32(t + 32) + 16);
+        if (len) memcpy(p->tls, (void *)start, len);
+        if (idx) *(u32 *)idx = 0;
+        p->tls_cb = RD64(t + 24);
+    }
+    p->entry = (u64)img + RD32(oh + 16);
+    klog("exe: %s cargado en 0x%x (%s)\n", p->name, (u32)(uptr)img, RD16(oh + 68) == 2 ? "ventanas" : "consola");
+    return RD16(oh + 68) == 3 ? "consola" : NULL;
+}
+
+static void fiber_main(void) {
+    w32proc_t *p = cur;
+    if (p->tls_cb)
+        for (u64 *cb = (u64 *)p->tls_cb; *cb; cb++)
+            ((void (WINAPI *)(void *, u32, void *))*cb)(p->image, 1, NULL);
+    int rc = ((INTFN)p->entry)();
+    proc_exit(rc);
+}
+
+int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) {
+    w32proc_t *p = kzalloc(sizeof *p);
+    if (!p) return -1;
+    strncpy0(p->name, name, sizeof p->name);
+    p->icon = icon;
+    w32proc_t *prev = cur;
+    cur = p;
+    const char *err = pe_load(p, data, size);
+    cur = prev;
+    int console = err && strcmp(err, "consola") == 0;
+    if (err && !console) {
+        klog("exe: no se pudo abrir %s: %s\n", name, err);
+        notify(icon, "No se pudo abrir el programa", err);
+        kfree(p->raw);
+        kfree(p->tls);
+        kfree(p);
+        return -1;
+    }
+    u32 stack_size = 512 * 1024;
+    p->stack = kmalloc(stack_size);
+    p->teb = kzalloc(0x1000);
+    p->peb = kzalloc(0x400);
+    if (!p->stack || !p->teb || !p->peb) { kfree(p->raw); kfree(p->stack); kfree(p->teb); kfree(p->peb); kfree(p); return -1; }
+    uptr top = ((uptr)p->stack + stack_size) & ~(uptr)15;
+    *(u64 *)(p->teb + 0x08) = top;
+    *(u64 *)(p->teb + 0x10) = (u64)p->stack;
+    *(u64 *)(p->teb + 0x30) = (u64)p->teb;
+    *(u64 *)(p->teb + 0x40) = 4;
+    *(u64 *)(p->teb + 0x48) = 8;
+    *(u64 *)(p->teb + 0x58) = (u64)(p->teb + 0x800); /* TLS array */
+    *(u64 *)(p->teb + 0x800) = (u64)p->tls;
+    *(u64 *)(p->teb + 0x60) = (u64)p->peb;
+    *(u64 *)(p->peb + 0x10) = (u64)p->image;
+    p->rsp = top - 64;
+    memset((void *)p->rsp, 0, 64);
+    *(u64 *)(p->rsp + 48) = (u64)fiber_main;
+    if (console) { cur = p; con_open(p); cur = prev; }
+    p->next = procs;
+    procs = p;
+    return 0;
+}
+
+static void proc_free(w32proc_t *p) {
+    w32proc_t *prev = cur;
+    cur = p;
+    for (w32win_t *w = p->wins; w; w = w->next)
+        if (w->cw) { cw_window *cw = w->cw; w->cw = NULL; w->destroyed = 1; win_close(cw); }
+    if (box.p == p) box.p = NULL;
+    while (p->blocks) p_free(p->blocks + 1);
+    cur = prev;
+    kfree(p->raw); kfree(p->stack); kfree(p->teb); kfree(p->peb); kfree(p->tls);
+    p->raw = p->stack = p->teb = p->peb = p->tls = NULL;
+    p->wins = NULL;
+    p->cleaned = 1;
+    klog("exe: %s terminó (código %d)\n", p->name, p->exit_code);
+}
+
+static int ready(w32proc_t *p) {
+    switch (p->wait) {
+    case W_MSG: {
+        if (p->qcount || p->quit) return 1;
+        for (w32win_t *w = p->wins; w; w = w->next) if (w->dirty && !w->destroyed && w->cw) return 1;
+        return 0;
+    }
+    case W_SLEEP: return (i32)(ticks_ms - p->wake_at) >= 0;
+    case W_BOX: return !p->box_open;
+    }
+    return 1;
+}
+
+/* Called by the desktop loop: timers, then each program that can run. */
+void win32_poll(void) {
+    for (w32proc_t **pp = &procs; *pp;) {
+        w32proc_t *p = *pp;
+        if (p->killed && !p->done) p->done = 1;
+        if (p->done) {
+            if (!p->cleaned) {
+                proc_free(p);
+                if (p->con) {
+                    w32proc_t *prev = cur; cur = p;
+                    { const char *m = "\n[El programa terminó. Cierra esta ventana cuando quieras.]"; con_write(m, (int)strlen(m)); }
+                    cur = prev;
+                }
+            }
+            con_draw(p);
+            if (!p->con) { *pp = p->next; kfree(p); continue; }
+            pp = &p->next;
+            continue;
+        }
+        for (w32win_t *w = p->wins; w; w = w->next)
+            for (int i = 0; i < 8; i++) {
+                wtimer_t *t = &w->timers[i];
+                if (t->used && !w->destroyed && (i32)(ticks_ms - t->next) >= 0) {
+                    t->next = ticks_ms + t->every;
+                    if (!t->pending) { t->pending = 1; post(p, w, 0x113, t->id, 0); }
+                }
+            }
+        if (ready(p)) {
+            cur = p;
+            set_gs((u64)p->teb);
+            ctx_switch(&kernel_rsp, p->rsp);
+            cur = NULL;
+            flush_windows(p);
+        }
+        con_draw(p);
+        pp = &p->next;
+    }
+}
+
+#else /* 32-bit build: Windows programs need the 64-bit Chamows */
+int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) {
+    notify(icon, "No se pudo abrir el programa", "Los .exe solo funcionan en Chamows de 64 bits.");
+    return -1;
+}
+void win32_poll(void) {}
+#endif
