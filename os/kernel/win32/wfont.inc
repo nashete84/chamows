@@ -9,7 +9,11 @@ typedef struct {
     u16 family[64], style[32], full[96];
     int weight, italic, fixed;
     u32 usb[4], csb[2];       /* Unicode ranges and code pages the font covers (OS/2 table) */
+    int priv;                 /* added by the program from memory: not listed */
+    u8 *data; u32 size;       /* the file, loaded when text is first drawn with it */
+    void *face;               /* rasterizer state (wtext.inc) */
 } wfontinfo_t;
+#define MAX_FONTS 128
 static wfontinfo_t *fonts;
 static int nfonts = -1;
 #define FONT_DIR "WINDOWS/FONTS"
@@ -49,15 +53,15 @@ static int sfnt_name(const u8 *t, u32 len, u16 id, u16 *out, int max) {
     out[n] = 0;
     return n;
 }
-static void font_add(const char *file, const u8 *d, u32 size) {
-    if (size < 12 || nfonts >= 64) return;
+static wfontinfo_t *font_add(const char *file, const u8 *d, u32 size) {
+    if (size < 12 || nfonts >= MAX_FONTS) return NULL;
     u32 tag = be32(d);
-    if (tag != 0x00010000 && tag != 0x4F54544F && tag != 0x74727565) return; /* TrueType, OpenType (CFF), 'true' */
+    if (tag != 0x00010000 && tag != 0x4F54544F && tag != 0x74727565) return NULL; /* TrueType, OpenType (CFF), 'true' */
     u32 nl, ol, pl;
     const u8 *name = sfnt_table(d, size, "name", &nl), *os2 = sfnt_table(d, size, "OS/2", &ol), *post = sfnt_table(d, size, "post", &pl);
     wfontinfo_t *f = &fonts[nfonts];
     memset(f, 0, sizeof *f);
-    if (!sfnt_name(name, nl, 1, f->family, 64)) return;
+    if (!sfnt_name(name, nl, 1, f->family, 64)) return NULL;
     if (!sfnt_name(name, nl, 2, f->style, 32)) a2w("Regular", f->style, 32);
     if (!sfnt_name(name, nl, 4, f->full, 96)) memcpy(f->full, f->family, sizeof f->family);
     strncpy0(f->file, file, sizeof f->file);
@@ -72,11 +76,12 @@ static void font_add(const char *file, const u8 *d, u32 size) {
     if (!f->usb[0] && !f->csb[0]) { f->usb[0] = 3; f->csb[0] = 1; } /* no coverage data: assume Latin */
     if (post && pl >= 16) f->fixed = be32(post + 12) != 0;
     nfonts++;
+    return f;
 }
 static void fonts_scan(void) {
     if (nfonts >= 0 && fonts) return;
     nfonts = 0;
-    if (!fonts) fonts = kzalloc(64 * sizeof *fonts);
+    if (!fonts) fonts = kzalloc(MAX_FONTS * sizeof *fonts);
     fat_entry_t *list = kmalloc(128 * sizeof *list);
     if (!fonts || !list || !fat_mounted) { kfree(list); return; }
     fat_entry_t e;
@@ -142,6 +147,7 @@ static WINAPI int t_EnumFontFamiliesExW(void *dc, const u8 *lf, FONTENUMPROCW pr
     const u16 *face = (const u16 *)(lf + 28);
     int charset = lf[23] == 1 ? 0 : lf[23], r = 1; /* DEFAULT_CHARSET: report ANSI */
     for (int i = 0; i < nfonts && r; i++) {
+        if (fonts[i].priv) continue;
         if (face[0]) { if (wcsieq(face, fonts[i].family)) r = font_call(&fonts[i], charset, proc, lp); continue; }
         int seen = 0; /* one call per family */
         for (int j = 0; j < i; j++) if (wcsieq(fonts[j].family, fonts[i].family)) seen = 1;

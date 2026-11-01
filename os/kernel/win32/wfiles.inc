@@ -18,6 +18,7 @@ typedef struct {
     u64 size, cap, pos;
     int can_read, can_write, append, dirty, eof, err, ungot;
     void *next; /* all open files, so a second handle sees unsaved writes */
+    int del_on_close;
 } wfile_t;
 static wfile_t *wf_open_list;
 static int wf_flush(wfile_t *f);
@@ -112,7 +113,8 @@ static int wf_reserve(wfile_t *f, u64 need) {
     return 0;
 }
 static void wf_close(wfile_t *f) {
-    wf_flush(f);
+    if (f->del_on_close) { f->dirty = 0; if (fat_mounted) fat_delete(f->path); }
+    else wf_flush(f);
     for (wfile_t **pp = &wf_open_list; *pp; pp = (wfile_t **)&(*pp)->next) if (*pp == f) { *pp = f->next; break; }
     f->magic = 0;
     if (f->data) kfree(f->data);
@@ -220,7 +222,11 @@ static u64 create_file(const char *name, u32 access, u32 disp) {
     return (u64)f;
 }
 static WINAPI u64 f_CreateFileW(const u16 *n, u32 acc, u32 share, void *sa, u32 disp, u32 fl, u64 tmpl) {
-    char a[320]; w2a(n, a, sizeof a); return create_file(a, acc, disp);
+    char a[320]; w2a(n, a, sizeof a);
+    u64 r = create_file(a, acc, disp);
+    wfile_t *f = WF(r);
+    if (f && (fl & 0x04000000)) f->del_on_close = 1; /* FILE_FLAG_DELETE_ON_CLOSE */
+    return r;
 }
 static WINAPI u64 f_CreateFileA(const char *n, u32 acc, u32 share, void *sa, u32 disp, u32 fl, u64 tmpl) { return create_file(n, acc, disp); }
 
@@ -283,6 +289,12 @@ static u32 file_attrs(const char *name) {
     if (fix_path(name, fp, sizeof fp) != 0 || fstat_path(fp, &e) != 0) { last_error = 2; return 0xFFFFFFFF; }
     return attrs_of(&e);
 }
+/* a file's last write time (FAT keeps it to 2 seconds); "now" when there is none */
+static u64 entry_ft(const fat_entry_t *e) {
+    u64 ft;
+    if (!e->wdate) { k_GetSystemTimeAsFileTime(&ft); return ft; }
+    return civil_ft(1980 + (e->wdate >> 9), (e->wdate >> 5) & 15, e->wdate & 31, e->wtime >> 11, (e->wtime >> 5) & 63, (e->wtime & 31) * 2);
+}
 static WINAPI u32 f_GetFileAttributesW(const u16 *n) { char a[320]; w2a(n, a, sizeof a); return file_attrs(a); }
 static WINAPI u32 f_GetFileAttributesA(const char *n) { return file_attrs(n); }
 static WINAPI int f_GetFileAttributesExW(const u16 *n, u32 level, u32 *out) {
@@ -292,7 +304,8 @@ static WINAPI int f_GetFileAttributesExW(const u16 *n, u32 level, u32 *out) {
     if (fix_path(a, fp, sizeof fp) != 0 || fstat_path(fp, &e) != 0) { last_error = 2; return 0; }
     memset(out, 0, 36);
     out[0] = attrs_of(&e);
-    for (int i = 0; i < 3; i++) k_GetSystemTimeAsFileTime((u64 *)(out + 1 + 2 * i));
+    u64 ft = entry_ft(&e);
+    for (int i = 0; i < 3; i++) memcpy(out + 1 + 2 * i, &ft, 8);
     out[8] = e.size;
     return 1;
 }
@@ -301,10 +314,62 @@ static WINAPI int f_GetFileInformationByHandle(u64 h, u32 *out) {
     if (!f) return 0;
     memset(out, 0, 52);
     out[0] = 0x20;
+    u64 ft;
+    fat_entry_t e;
+    if (f->dirty || fstat_path(f->path, &e) != 0) k_GetSystemTimeAsFileTime(&ft); else ft = entry_ft(&e);
+    for (int i = 0; i < 3; i++) memcpy(out + 1 + 2 * i, &ft, 8);
     out[7] = 0xC4A3; /* volume serial */
     out[9] = (u32)f->size;
     out[10] = 1;
     return 1;
+}
+
+static WINAPI int f_GetFileTime(u64 h, u64 *c, u64 *a, u64 *w) {
+    u32 info[13];
+    if (!f_GetFileInformationByHandle(h, info)) return 0;
+    if (c) memcpy(c, info + 1, 8);
+    if (a) memcpy(a, info + 3, 8);
+    if (w) memcpy(w, info + 5, 8);
+    return 1;
+}
+
+/* SetFileInformationByHandle: delete or rename through an open handle (Qt removes files this way) */
+static int move_file(const char *from, const char *to, int replace);
+static WINAPI int f_SetFileInformationByHandle(u64 h, u32 cls, const u8 *info, u32 size) {
+    wfile_t *f = WF(h);
+    if (!f || !info) { last_error = 6; return 0; }
+    switch (cls) {
+    case 0: case 5: return 1;                                            /* FileBasicInfo, FileAllocationInfo */
+    case 4: f->del_on_close = info[0] != 0; return 1;                    /* FileDispositionInfo */
+    case 21: f->del_on_close = (*(const u32 *)info & 1) != 0; return 1;  /* FileDispositionInfoEx */
+    case 6: {                                                            /* FileEndOfFileInfo */
+        u64 n = *(const u64 *)info;
+        if (n > f->size && wf_reserve(f, n) == 0) memset(f->data + f->size, 0, n - f->size);
+        if (n <= f->cap || !f->data) f->size = n;
+        f->dirty = 1;
+        return 1;
+    }
+    case 3: case 22: {                                                   /* FileRenameInfo(Ex) */
+        u32 len = *(const u32 *)(info + 16) / 2;
+        int replace = cls == 3 ? info[0] != 0 : (*(const u32 *)info & 1) != 0;
+        u16 w[300];
+        if (len >= 300) { last_error = 206; return 0; }
+        memcpy(w, info + 20, 2 * (u64)len);
+        w[len] = 0;
+        char a[320], to[160];
+        w2a(w, a, sizeof a);
+        if (fix_path(a, to, sizeof to) != 0) { last_error = 3; return 0; }
+        f->dirty = 1;
+        char fa[170], ta[170];
+        ksnprintf(fa, sizeof fa, "/%s", f->path);
+        ksnprintf(ta, sizeof ta, "/%s", to);
+        if (wf_flush(f) != 0 || !move_file(fa, ta, replace)) return 0;
+        strncpy0(f->path, to, sizeof f->path);
+        return 1;
+    }
+    }
+    last_error = 50;
+    return 0;
 }
 
 /* wildcards: '*' and '?', any case */
@@ -331,7 +396,8 @@ static int find_next(wfind_t *d, u8 *out, int wide) {
         if (!wild(d->pat, nm) && !wild(d->pat, e->name) && strcmp(d->pat, "*.*") != 0) continue;
         memset(out, 0, wide ? 592 : 320);
         *(u32 *)out = attrs_of(e);
-        for (int i = 0; i < 3; i++) k_GetSystemTimeAsFileTime((u64 *)(out + 4 + 8 * i));
+        u64 ft = entry_ft(e);
+        for (int i = 0; i < 3; i++) memcpy(out + 4 + 8 * i, &ft, 8);
         *(u32 *)(out + 32) = e->size;
         if (wide) { a2w(nm, (u16 *)(out + 44), 260); a2w(e->name, (u16 *)(out + 44 + 520), 14); }
         else { strncpy0((char *)out + 44, nm, 260); strncpy0((char *)out + 44 + 260, e->name, 14); }
@@ -703,7 +769,7 @@ static const struct { const char *name; void *fn; } exports_files[] = {
     {"GetFileSizeEx", f_GetFileSizeEx}, {"FlushFileBuffers", f_FlushFileBuffers}, {"SetEndOfFile", f_SetEndOfFile},
     {"GetFileType", f_GetFileType}, {"CloseHandle", f_CloseHandle}, {"GetFileAttributesW", f_GetFileAttributesW},
     {"GetFileAttributesA", f_GetFileAttributesA}, {"GetFileAttributesExW", f_GetFileAttributesExW},
-    {"GetFileInformationByHandle", f_GetFileInformationByHandle}, {"FindFirstFileW", f_FindFirstFileW},
+    {"GetFileInformationByHandle", f_GetFileInformationByHandle}, {"GetFileTime", f_GetFileTime}, {"SetFileInformationByHandle", f_SetFileInformationByHandle}, {"FindFirstFileW", f_FindFirstFileW},
     {"FindFirstFileA", f_FindFirstFileA}, {"FindFirstFileExW", f_FindFirstFileExW}, {"FindNextFileW", f_FindNextFileW},
     {"FindNextFileA", f_FindNextFileA}, {"FindClose", f_FindClose}, {"CreateDirectoryW", f_CreateDirectoryW},
     {"CreateDirectoryA", f_CreateDirectoryA}, {"DeleteFileW", f_DeleteFileW}, {"DeleteFileA", f_DeleteFileA},

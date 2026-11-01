@@ -225,7 +225,7 @@ static int dir_find_name(u32 dir, const char *s, int len, dirent_t *out, loc_t *
             if ((has83 && memcmp(e[i].name, n83, 11) == 0) || (longok && same_name(l.s, s, len))) {
                 if (out) *out = e[i];
                 if (loc) { loc->cluster = c; loc->index = i; }
-                if (lname) { if (longok) strncpy0(lname, l.s, 64); else from83(e[i].name, lname); }
+                if (lname) { if (longok) strncpy0(lname, l.s, 256); else from83(e[i].name, lname); }
                 return 0;
             }
         }
@@ -270,10 +270,14 @@ static int walk(const char *path, u32 *parent, char last83[11]) {
     for (int i = 0; i < len; i++) if (last[i] == '/' || last[i] == '\\' || last[i] == ':' || last[i] == '*' || last[i] == '?') return -1;
     int dot = -1;
     for (int i = 0; i < len; i++) if (last[i] == '.') dot = i;
-    for (int n = 1; n <= 9; n++) {
+    for (int n = 1; n <= 99999; n++) { /* NAME~1 ... NAME~9, then N~12345 like Windows */
+        char num[6];
+        int nd = 0;
+        for (int v = n; v; v /= 10) nd++;
+        for (int v = n, i = nd - 1; i >= 0; v /= 10, i--) num[i] = (char)('0' + v % 10);
         memset(last83, ' ', 11);
         int k = 0;
-        for (int i = 0; i < (dot < 0 ? len : dot) && k < 6; i++) {
+        for (int i = 0; i < (dot < 0 ? len : dot) && k < 7 - nd; i++) {
             char c = last[i];
             if (c == ' ' || c == '.') continue;
             if (c >= 'a' && c <= 'z') c = (char)(c - 32);
@@ -282,7 +286,7 @@ static int walk(const char *path, u32 *parent, char last83[11]) {
         }
         if (!k) last83[k++] = '_';
         last83[k++] = '~';
-        last83[k] = (char)('0' + n);
+        for (int i = 0; i < nd; i++) last83[k++] = num[i];
         for (int i = dot + 1, j = 8; dot >= 0 && i < len && j < 11; i++) {
             char c = last[i];
             if (c == ' ') continue;
@@ -309,6 +313,8 @@ int fat_stat(const char *path, fat_entry_t *out) {
     from83(e.name, out->name);
     out->size = e.size;
     out->is_dir = (e.attr & ATTR_DIR) != 0;
+    out->wdate = e.wdate;
+    out->wtime = e.wtime;
     return 0;
 }
 
@@ -340,9 +346,11 @@ int fat_list(const char *path, fat_entry_t *out, int max) {
             if ((e[i].attr & ATTR_VOLUME) || e[i].name[0] == '.') continue;
             if (n < max) {
                 from83(e[i].name, out[n].name);
-                if (longok) strncpy0(out[n].lname, l.s, 64);
-                else strncpy0(out[n].lname, out[n].name, 64);
+                if (longok) strncpy0(out[n].lname, l.s, 256);
+                else strncpy0(out[n].lname, out[n].name, 256);
                 out[n].size = e[i].size;
+                out[n].wdate = e[i].wdate;
+                out[n].wtime = e[i].wtime;
                 out[n].is_dir = (e[i].attr & ATTR_DIR) != 0;
             }
             n++;
@@ -498,10 +506,11 @@ int fat_mkdir(const char *path) {
 int fat_delete(const char *path) {
     if (!fat_mounted) return -1;
     u32 parent;
-    char n83[11];
+    const char *last;
+    int len;
     dirent_t e;
     loc_t loc;
-    if (walk(path, &parent, n83) != 0 || dir_find(parent, n83, &e, &loc) != 0 || (e.attr & ATTR_DIR)) return -1;
+    if (walk_name(path, &parent, &last, &len) != 0 || dir_find_name(parent, last, len, &e, &loc, NULL) != 0 || (e.attr & ATTR_DIR)) return -1;
     free_chain(ent_cluster(&e));
     e.name[0] = (char)0xE5;
     if (read_cluster(loc.cluster) == 0) { /* its long name entries go too */

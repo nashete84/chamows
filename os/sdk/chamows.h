@@ -24,6 +24,7 @@ enum cw_event_type {
     CW_KEY,            /* key: Latin-1 character or CW_KEY_* */
     CW_TICK,           /* timer set with set_timer */
     CW_CLOSE,          /* window is closing: free your resources */
+    CW_RESIZE,         /* the window was maximized or restored: x, y = new client size */
 };
 
 enum {

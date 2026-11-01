@@ -33,6 +33,9 @@ struct cw_window {
     int hover;                /* also send CW_MOUSE_MOVE (button 0) without a button held */
     int popup;                /* no frame, no taskbar button, stays above normal windows (menus, tooltips) */
     int alpha;                /* client pixels carry alpha (layered windows): blended over what is behind */
+    int resizable;            /* has a maximize button (Windows programs with a sizing border) */
+    int maximized;
+    rect_t restore;           /* frame position and client size before maximizing */
     struct app_instance *app; /* NULL for built-in apps */
     struct cw_window *next;   /* z-order: list head is the bottom */
 };
@@ -50,6 +53,7 @@ void win_invalidate(cw_window *w);
 void win_focus(cw_window *w);
 void win_show(cw_window *w, int show);         /* hide or show a window */
 int win_resize(cw_window *w, int cw, int ch);   /* new client size; 0 on success */
+void win_maximize(cw_window *w, int on);        /* fill the screen above the taskbar, or go back */
 void win_make_popup(cw_window *w);              /* turn into a frameless popup */
 void win_place(cw_window *w, int x, int y);     /* move so the client area starts at x,y on screen */
 cw_window *win_top(void);                       /* the focused window, or NULL */

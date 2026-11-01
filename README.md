@@ -38,8 +38,12 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
   Las fuentes TrueType se ponen en `WINDOWS\FONTS` del pendrive (por ejemplo DejaVu Sans).
   Los programas Qt usan el aspecto **Windows 11** (botones redondeados, acento azul, menús translúcidos);
   Chamows pone su propia fuente de iconos (`CHAMOWSI.TTF`) en `WINDOWS\FONTS` la primera vez.
-- **Telegram Desktop (en camino)**: el `Telegram.exe` oficial arranca, escribe su registro y llega a
-  cargar las fuentes; falta dibujar texto con GDI/DirectWrite.
+- **Telegram Desktop (en camino)**: el `Telegram.exe` oficial arranca y muestra su primera ventana
+  con texto (Chamows dibuja las letras TrueType con las funciones GDI de Windows, usando stb_truetype).
+  Se cierra al pintar la ventana principal; es el siguiente paso.
+- Ventanas como en Windows 11: botón **maximizar/restaurar** (y doble clic en el título) para los
+  programas de Windows que cambian de tamaño, y cada programa con **su propio icono** en el título,
+  la barra de tareas y los avisos.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.

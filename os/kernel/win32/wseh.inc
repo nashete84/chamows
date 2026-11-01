@@ -351,6 +351,19 @@ static void ex_fatal(ex_rec_t *rec, context_t *c) {
         if (*(const u32 *)(dli + 32)) klog("exe:   carga diferida: %s!%s no existe\n", dll ? dll : "?", fn ? fn : "?");
         else klog("exe:   carga diferida: %s!#%u no existe\n", dll ? dll : "?", (u32)(u64)fn);
     }
+    { /* where it came from: the callers, found with the unwind tables */
+        context_t t;
+        memcpy(&t, c, CX_SIZE);
+        dispatcher_t d;
+        memset(&d, 0, sizeof d);
+        d.context = &t;
+        for (int i = 0; i < 12 && step(0, &d, &t); i++) {
+            u64 ip = CXQ(&t, CX_RIP), mb = 0;
+            w32mod_t *mm = mod_at(ip, &mb);
+            if (!mm) break;
+            klog("exe:   llamada desde %s+0x%x\n", mm->name, (u32)(ip - mb));
+        }
+    }
     char msg[120];
     ksnprintf(msg, sizeof msg, "Error %x en %s. El programa se cerró.", rec->code, m ? m->name : "Chamows");
     notify(cur->icon, cur->name, msg);
@@ -470,6 +483,14 @@ static void cpu_fault(regs_t *r) {
     if (!cur_th || !cur || cur->done) return; /* not a Windows thread: the kernel stops as before */
     if (in_chamows(r->rip)) {
         klog("exe: fallo %u dentro de Chamows (ip=%x) mientras corría %s; se cierra el programa\n", (u32)r->int_no, (u32)r->rip, cur->name);
+        { /* the Chamows and program functions it came through (return addresses found on the stack) */
+            u64 *sp = (u64 *)r->rsp;
+            for (int i = 0, n = 0; i < 400 && n < 10; i++) {
+                u64 v = sp[i], mb = 0;
+                if (in_chamows(v)) { klog("exe:   pila: chamows %x\n", (u32)v); n++; }
+                else { w32mod_t *m = mod_at(v, &mb); if (m) { klog("exe:   pila: %s+0x%x\n", m->name, (u32)(v - mb)); n++; } }
+            }
+        }
         notify(cur->icon, cur->name, "Error interno de Chamows. El programa se cerró.");
         proc_exit(255);
     }

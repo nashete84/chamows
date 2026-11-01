@@ -16,7 +16,9 @@ static WINAPI u16 g_RegisterClassW(const u8 *wc) {
     char n[64];
     wname(*(const u16 **)(wc + 64), n, sizeof n);
     if (find_class(n)) return 0xC000; /* already there */
-    return register_class(n, *(WNDPROC *)(wc + 8), *(u64 *)(wc + 48));
+    u16 atom = register_class(n, *(WNDPROC *)(wc + 8), *(u64 *)(wc + 48));
+    if (atom) cur->classes[atom - 0xC000].icon = icon_of(*(const u64 *)(wc + 32));
+    return atom;
 }
 static WINAPI int g_GetClassInfoExW(void *inst, const u16 *name, u8 *out) {
     char n[64];
@@ -65,6 +67,7 @@ static WINAPI void *g_CreateWindowExW(u32 ex, const u16 *cls, const u16 *title, 
         win->style = style;
         win->exstyle = ex;
         if (win->cw) win->cw->hover = 1;
+        if (win->cw && !win->cw->popup && (style & 0x50000)) win->cw->resizable = 1; /* WS_THICKFRAME or WS_MAXIMIZEBOX */
     }
     return win;
 }
@@ -77,6 +80,7 @@ static WINAPI void *g_CreateWindowExA(u32 ex, const char *cls, const char *title
     }
     w32win_t *win = u_CreateWindowExA(ex, cls, title, style, x, y, w, h, parent, menu, inst, param);
     if (win) { win->style = style; win->exstyle = ex; }
+    if (win && win->cw && !win->cw->popup && (style & 0x50000)) win->cw->resizable = 1;
     return win;
 }
 static WINAPI int g_ShowWindow(void *h, int cmd) {
@@ -88,9 +92,12 @@ static WINAPI int g_ShowWindow(void *h, int cmd) {
     if (cmd == 0) { win_show(w->cw, 0); return was; }       /* SW_HIDE */
     win_show(w->cw, 1);
     if (cmd == 2 || cmd == 6 || cmd == 7) { w->cw->minimized = 1; return was; } /* minimize */
+    if (cmd == 3) win_maximize(w->cw, 1);                                          /* SW_MAXIMIZE */
+    if (cmd == 9) { w->cw->minimized = 0; win_maximize(w->cw, 0); }                 /* SW_RESTORE */
     if (cmd != 4 && cmd != 8) { win_focus(w->cw); activate(w); } /* 4 and 8 show without activating */
     return was;
 }
+static WINAPI int g_IsZoomed(void *h) { w32win_t *w = W(h); return w && w->cw && w->cw->maximized; }
 static WINAPI int g_SetWindowPos(void *h, void *after, int x, int y, int cx, int cy, u32 fl) {
     w32win_t *w = W(h);
     if (!w || !w->cw) return 1;
@@ -127,7 +134,7 @@ static WINAPI i64 g_SetWindowLongPtrW(void *h, int i, i64 v) {
     i64 old = g_GetWindowLongPtrW(h, i);
     switch (i) {
     case -4: w->proc = (WNDPROC)v; break;
-    case -16: w->style = (u32)v; break;
+    case -16: w->style = (u32)v; if (w->cw && !w->cw->popup) w->cw->resizable = (w->style & 0x50000) != 0; break;
     case -20: w->exstyle = (u32)v; break;
     case -21: w->userdata = v; break;
     }
@@ -358,7 +365,7 @@ static const struct { const char *name; void *fn; } exports_gui[] = {
     {"GetForegroundWindow", g_GetForegroundWindow}, {"GetFocus", g_GetForegroundWindow}, {"GetActiveWindow", g_GetForegroundWindow},
     {"SetFocus", g_SetFocus}, {"SetActiveWindow", g_SetFocus}, {"SetForegroundWindow", g_SetForegroundWindow},
     {"BringWindowToTop", g_SetForegroundWindow}, {"GetDesktopWindow", g_GetDesktopWindow}, {"IsIconic", g_IsIconic},
-    {"IsZoomed", k_zero}, {"IsWindowVisible", g_IsWindowVisible}, {"GetParent", k_zero},
+    {"IsZoomed", g_IsZoomed}, {"IsWindowVisible", g_IsWindowVisible}, {"GetParent", k_zero},
     {"SetWindowTextW", g_SetWindowTextW}, {"GetWindowTextW", g_GetWindowTextW}, {"GetWindowTextLengthW", k_zero},
     {"GetUpdateRect", g_GetUpdateRect}, {"GetWindowThreadProcessId", g_GetWindowThreadProcessId},
     {"PostMessageW", u_PostMessageA}, {"SendMessageW", u_SendMessageA}, {"PostThreadMessageW", g_PostThreadMessageW},

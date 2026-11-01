@@ -22,9 +22,9 @@ typedef struct { void *hwnd; u32 message; u64 wparam; i64 lparam; u32 time; i32 
 typedef struct { i32 left, top, right, bottom; } RECT;
 
 enum { K_BRUSH = 1, K_PEN, K_FONT, K_BITMAP };
-typedef struct gobj { int kind; u32 color; int width, font, null; surface_t surf; int dib; u32 *base; } gobj_t; /* dib: pixels the program writes; base: their allocation */
+typedef struct gobj { int kind; u32 color; int width, font, null; surface_t surf; int dib; u32 *base; void *ttf; } gobj_t; /* dib: pixels the program writes; base: their allocation; ttf: TrueType font (wtext.inc) */
 struct w32win;
-typedef struct { struct w32win *w; gobj_t *brush, *pen, *font, *bmp; u32 text, bk; int bkmode, cx, cy; } dc_t;
+typedef struct { struct w32win *w; gobj_t *brush, *pen, *font, *bmp; u32 text, bk; int bkmode, cx, cy; int gmode, talign, has_xf; float xf[6]; } dc_t;
 
 typedef struct { u64 id; u32 every, next; int used, pending; } wtimer_t;
 typedef struct w32win {
@@ -37,6 +37,7 @@ typedef struct w32win {
     i64 userdata;
     u32 style, exstyle;
     int activated, hidden;   /* hidden: HWND_MESSAGE windows, never on screen */
+    int big_icon;            /* WM_SETICON gave it a big icon */
     struct { char name[32]; u64 v; } props[8];
     dc_t dc;
     wtimer_t timers[48];
@@ -44,7 +45,7 @@ typedef struct w32win {
 } w32win_t;
 #define WIN_MAGIC 0x57494E44
 
-typedef struct { char name[64]; WNDPROC proc; u32 bg; } wclass_t;
+typedef struct { char name[64]; WNDPROC proc; u32 bg; const icon_t *icon; } wclass_t;
 typedef struct blk { struct blk *next, *prev; u64 size, pad; } blk_t;
 
 typedef struct w32thread {
@@ -442,6 +443,11 @@ static void win_event(cw_window *cw, const cw_event *ev) {
         if (vk) post(p, w, 0x101, (u64)vk, klp | (i64)0xC0000000);
         break;
     }
+    case CW_RESIZE: /* maximized or restored from the title bar */
+        w->dirty = 1;
+        post(p, w, 0x3, 0, (i64)((u32)(u16)(cw->y + TITLE_H) << 16 | (u16)cw->x));               /* WM_MOVE */
+        post(p, w, 0x5, cw->maximized ? 2 : 0, (i64)((u32)cw->h << 16 | (u32)cw->w));          /* WM_SIZE */
+        break;
     case CW_CLOSE:
         w->cw = NULL;
         if (!w->destroyed) post(p, w, 0x10, 0, 0); /* WM_CLOSE */
@@ -462,18 +468,18 @@ static void stock_init(void) {
     if (done) return;
     done = 1;
     u32 grays[5] = {0xFFFFFFFF, 0xFFC0C0C0, 0xFF808080, 0xFF404040, 0xFF000000};
-    for (int i = 0; i < 5; i++) stock_obj[i] = (gobj_t){K_BRUSH, grays[i], 0, 0, 0, {0}, 0, NULL};
-    stock_obj[5] = (gobj_t){K_BRUSH, 0, 0, 0, 1, {0}, 0, NULL};
-    stock_obj[6] = (gobj_t){K_PEN, 0xFFFFFFFF, 1, 0, 0, {0}, 0, NULL};
-    stock_obj[7] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}, 0, NULL};
-    stock_obj[8] = (gobj_t){K_PEN, 0, 1, 0, 1, {0}, 0, NULL};
-    for (int i = 10; i <= 17; i++) stock_obj[i] = (gobj_t){K_FONT, 0, 0, CW_FONT_UI, 0, {0}, 0, NULL};
-    stock_obj[18] = (gobj_t){K_BRUSH, 0xFFFFFFFF, 0, 0, 0, {0}, 0, NULL};
-    stock_obj[19] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}, 0, NULL};
+    for (int i = 0; i < 5; i++) stock_obj[i] = (gobj_t){K_BRUSH, grays[i], 0, 0, 0, {0}, 0, NULL, NULL};
+    stock_obj[5] = (gobj_t){K_BRUSH, 0, 0, 0, 1, {0}, 0, NULL, NULL};
+    stock_obj[6] = (gobj_t){K_PEN, 0xFFFFFFFF, 1, 0, 0, {0}, 0, NULL, NULL};
+    stock_obj[7] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}, 0, NULL, NULL};
+    stock_obj[8] = (gobj_t){K_PEN, 0, 1, 0, 1, {0}, 0, NULL, NULL};
+    for (int i = 10; i <= 17; i++) stock_obj[i] = (gobj_t){K_FONT, 0, 0, CW_FONT_UI, 0, {0}, 0, NULL, NULL};
+    stock_obj[18] = (gobj_t){K_BRUSH, 0xFFFFFFFF, 0, 0, 0, {0}, 0, NULL, NULL};
+    stock_obj[19] = (gobj_t){K_PEN, 0xFF000000, 1, 0, 0, {0}, 0, NULL, NULL};
 }
 static void dc_init(dc_t *d, w32win_t *w) {
     stock_init();
-    *d = (dc_t){w, &stock_obj[0], &stock_obj[7], &stock_obj[13], NULL, 0xFF000000, 0xFFFFFFFF, 2, 0, 0};
+    *d = (dc_t){w, &stock_obj[0], &stock_obj[7], &stock_obj[13], NULL, 0xFF000000, 0xFFFFFFFF, 2, 0, 0, 1, 0, 0, {1, 0, 0, 1, 0, 0}};
 }
 static surface_t *dc_surf(dc_t *d) {
     if (!d) return NULL;
@@ -557,15 +563,18 @@ static WINAPI u32 k_GetCurrentProcessId(void) { return 4; }
 static WINAPI u64 k_GetCurrentProcess(void) { return (u64)-1; }
 /* FILETIME (100 ns since 1601) from the real-time clock, read once and moved on by the tick counter */
 static u64 boot_ft;
+static u64 civil_ft(int year, int month, int day, int hour, int min, int sec) {
+    i64 y = year - (month <= 2), era = (y >= 0 ? y : y - 399) / 400;
+    i64 yoe = y - era * 400, mp = (month + 9) % 12, doy = (153 * mp + 2) / 5 + day - 1;
+    i64 days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468; /* since 1970-01-01 */
+    i64 secs = days * 86400 + hour * 3600 + min * 60 + sec;
+    return (u64)(secs + 11644473600LL) * 10000000ULL;
+}
 static WINAPI void k_GetSystemTimeAsFileTime(u64 *ft) {
     if (!boot_ft) {
         rtc_time_t t;
         rtc_read(&t);
-        i64 y = t.year - (t.month <= 2), era = (y >= 0 ? y : y - 399) / 400;
-        i64 yoe = y - era * 400, mp = (t.month + 9) % 12, doy = (153 * mp + 2) / 5 + t.day - 1;
-        i64 days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468; /* since 1970-01-01 */
-        i64 secs = days * 86400 + t.hour * 3600 + t.min * 60 + t.sec;
-        boot_ft = (u64)(secs + 11644473600LL) * 10000000ULL - (u64)ticks_ms * 10000;
+        boot_ft = civil_ft(t.year, t.month, t.day, t.hour, t.min, t.sec) - (u64)ticks_ms * 10000;
     }
     *ft = boot_ft + (u64)ticks_ms * 10000;
 }
@@ -631,7 +640,7 @@ static WINAPI void *u_CreateWindowExA(u32 ex, const char *cls, const char *title
     chei = imax(60, imin(chei, SCREEN_H - TASKBAR_H - TITLE_H - 20));
     char t[80];
     to_utf8(title ? title : "", title ? (int)strlen(title) : 0, t, sizeof t);
-    win->cw = win_create(t, cwid, chei, win_event, win, cur->icon);
+    win->cw = win_create(t, cwid, chei, win_event, win, c->icon ? c->icon : cur->icon);
     if (!win->cw) { win->destroyed = 1; return NULL; }
     if (!(style & 0x10000000)) win_show(win->cw, 0); /* no WS_VISIBLE: hidden until ShowWindow */
     if (is_popup(style)) { /* menus, tooltips: no frame, exact size and place */
@@ -674,8 +683,14 @@ static WINAPI int u_DestroyWindow(void *h) {
     return 1;
 }
 static WINAPI void u_PostQuitMessage(int code) { cur->quit = 1; cur->exit_code = code; }
+static const icon_t *icon_of(u64 h);
 static WINAPI i64 u_DefWindowProcA(void *h, u32 msg, u64 wp, i64 lp) {
     w32win_t *w = W(h);
+    if (msg == 0x80 && w && w->cw) { /* WM_SETICON: the big icon, or the small one until there is a big one */
+        const icon_t *ic = icon_of((u64)lp);
+        if (ic && (wp == 1 || !w->big_icon)) { w->cw->icon = ic; w->big_icon |= wp == 1; win_invalidate(w->cw); }
+        return 0;
+    }
     if (msg == 0x10) u_DestroyWindow(h);
     else if (msg == 0xF && w) { w->dirty = 0; w->erase = 0; }
     return 0;
@@ -761,7 +776,14 @@ static WINAPI int u_InvalidateRect(void *h, const RECT *r, int erase) {
     return 1;
 }
 static WINAPI int u_ValidateRect(void *h, const RECT *r) { w32win_t *w = W(h); if (w) w->dirty = 0; return 1; }
-static WINAPI void *u_GetDC(void *h) { w32win_t *w = W(h); return w ? &w->dc : NULL; }
+static dc_t screen_dc; /* GetDC(NULL): for measuring text; drawing on it does nothing */
+static WINAPI void *u_GetDC(void *h) {
+    w32win_t *w = W(h);
+    if (w) return &w->dc;
+    if (h) return NULL;
+    if (!screen_dc.brush) dc_init(&screen_dc, NULL);
+    return &screen_dc;
+}
 static WINAPI int u_ReleaseDC(void *h, void *dc) { w32win_t *w = W(h); if (w) w->touched = 1; return 1; }
 static WINAPI int u_GetClientRect(void *h, RECT *r) {
     w32win_t *w = W(h);
@@ -907,7 +929,10 @@ static WINAPI void *g_SelectObject(dc_t *d, gobj_t *o) {
 }
 static WINAPI int g_DeleteObject(gobj_t *o) {
     if (!o || (o >= stock_obj && o < stock_obj + 20)) return 1;
+    blk_t *b = (blk_t *)o - 1; /* only our own GDI objects (programs also pass DCs and icons here) */
+    if (((uptr)o & 15) || (uptr)o < 0x10000 || b->pad != 0xB10CB10C || b->size != sizeof(gobj_t) || o->kind < K_BRUSH || o->kind > K_BITMAP) return 0;
     if (o->kind == K_BITMAP) kfree(o->base ? o->base : o->surf.px);
+    if (o->ttf) p_free(o->ttf);
     p_free(o);
     return 1;
 }
@@ -1237,7 +1262,7 @@ static const struct { const char *name; void *fn; } exports[] = {
     {"LeaveCriticalSection", k_zero}, {"DeleteCriticalSection", k_zero}, {"InitializeCriticalSectionAndSpinCount", k_one},
     {"VirtualProtect", k_VirtualProtect}, {"VirtualQuery", k_VirtualQuery}, {"VirtualAlloc", k_VirtualAlloc},
     {"VirtualFree", k_one}, {"GetProcessHeap", k_one}, {"HeapAlloc", k_HeapAlloc}, {"HeapFree", k_HeapFree},
-    {"HeapReAlloc", k_HeapReAlloc}, {"GetCurrentProcessId", k_GetCurrentProcessId}, {"GetCurrentThreadId", k_GetCurrentProcessId},
+    {"HeapReAlloc", k_HeapReAlloc}, {"GetCurrentProcessId", k_GetCurrentProcessId},
     {"GetCurrentProcess", k_GetCurrentProcess}, {"GetSystemTimeAsFileTime", k_GetSystemTimeAsFileTime},
     {"GetLocalTime", k_GetLocalTime}, {"GetSystemTime", k_GetLocalTime}, {"OutputDebugStringA", k_OutputDebugStringA},
     {"TlsAlloc", k_TlsAlloc}, {"TlsGetValue", k_TlsGetValue}, {"TlsSetValue", k_TlsSetValue}, {"TlsFree", k_one},
@@ -1632,6 +1657,8 @@ __attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
 #include "wmisc.inc"
 #include "wuser.inc"
 #include "wfont.inc"
+#include "wtext.inc"
+#include "wicon.inc"
 
 static const struct { const char *name; void *fn; } exports2[] = {
     {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
@@ -1693,7 +1720,7 @@ static const struct { const char *name; void *fn; } exports2[] = {
 /* A function of the Win32 layer, by name; NULL if Chamows does not have it. */
 static void *builtin_lookup(const char *name) {
 #define LOOK(t) for (u32 j = 0; j < sizeof t / sizeof t[0]; j++) if (strcmp(t[j].name, name) == 0) return t[j].fn;
-    LOOK(exports_seh) LOOK(exports_sync) LOOK(exports_crt) LOOK(exports_font) LOOK(exports_misc) LOOK(exports_user) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
+    LOOK(exports_icon) LOOK(exports_text) LOOK(exports_seh) LOOK(exports_sync) LOOK(exports_crt) LOOK(exports_font) LOOK(exports_misc) LOOK(exports_user) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
 #undef LOOK
     return NULL;
 }
@@ -1818,6 +1845,7 @@ int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, 
     w32proc_t *prev = cur;
     cur = p;
     const char *err = pe_load(p, data, size);
+    if (!err || strcmp(err, "consola") == 0) { const icon_t *own = p->image ? exe_icon(p->image) : NULL; if (own) p->icon = own; } /* the .exe's own icon */
     cur = prev;
     int console = err && strcmp(err, "consola") == 0;
     if (err && !console) {

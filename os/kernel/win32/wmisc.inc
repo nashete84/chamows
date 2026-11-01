@@ -761,6 +761,8 @@ static WINAPI u32 m_GetThreadId(u64 h) { return 1; }
 /* random numbers for crypto libraries (OpenSSL in Telegram): old CryptoAPI and CNG */
 static WINAPI int m_CryptAcquireContextW(u64 *h, const u16 *cont, const u16 *prov, u32 type, u32 fl) { if (h) *h = 0xC4C4; return 1; }
 static WINAPI int m_CryptGenRandom(u64 h, u32 n, u8 *buf) { return m_SystemFunction036(buf, n); }
+/* no system list of TLS cipher suites: OpenSSL then uses its own */
+static WINAPI u32 m_BCryptEnumContextFunctions(u32 table, const u16 *ctx, u32 iface, u32 *cb, void **buf) { if (cb) *cb = 0; if (buf) *buf = NULL; return 0xC0000225; }
 static WINAPI u32 m_BCryptGenRandom(u64 alg, u8 *buf, u32 n, u32 fl) { m_SystemFunction036(buf, n); return 0; }
 static WINAPI u32 m_BCryptOpenAlgorithmProvider(u64 *h, const u16 *id, const u16 *impl, u32 fl) { if (h) *h = 0xB4B4; return 0; }
 static const struct { const char *name; void *fn; } exports_misc[] = {
@@ -810,7 +812,7 @@ static const struct { const char *name; void *fn; } exports_misc[] = {
     {"CreateNamedPipeW", m_CreateNamedPipeW}, {"ConnectNamedPipe", m_ConnectNamedPipe}, {"DisconnectNamedPipe", k_one}, {"PeekNamedPipe", m_fail}, {"CreateProcessW", m_fail},
     {"OpenProcess", k_zero}, {"TerminateProcess", m_fail}, {"TerminateThread", m_fail}, {"K32GetModuleFileNameExW", k_zero},
     {"CopyFileW", m_fail}, {"CreateHardLinkW", m_fail}, {"CreateSymbolicLinkW", m_fail}, {"RemoveDirectoryW", m_fail},
-    {"SetFileAttributesW", k_one}, {"SetFileTime", k_one}, {"SetFileInformationByHandle", m_fail},
+    {"SetFileAttributesW", k_one}, {"SetFileTime", k_one},
     {"GetFileInformationByHandleEx", m_fail}, {"FindFirstChangeNotificationW", m_neg1}, {"FindNextChangeNotification", m_fail},
     {"FindCloseChangeNotification", k_one},
     /* ntdll */
@@ -830,7 +832,7 @@ static const struct { const char *name; void *fn; } exports_misc[] = {
     {"SetSecurityDescriptorOwner", k_one}, {"SystemFunction036", m_SystemFunction036},
     {"CryptAcquireContextW", m_CryptAcquireContextW}, {"CryptAcquireContextA", m_CryptAcquireContextW}, {"CryptGenRandom", m_CryptGenRandom},
     {"CryptReleaseContext", k_one}, {"BCryptGenRandom", m_BCryptGenRandom}, {"BCryptOpenAlgorithmProvider", m_BCryptOpenAlgorithmProvider},
-    {"BCryptCloseAlgorithmProvider", k_zero},
+    {"BCryptCloseAlgorithmProvider", k_zero}, {"BCryptEnumContextFunctions", m_BCryptEnumContextFunctions}, {"BCryptFreeBuffer", k_zero},
     {"AuthzInitializeResourceManager", m_fail}, {"AuthzInitializeContextFromSid", m_fail}, {"AuthzInitializeContextFromToken", m_fail},
     {"AuthzAccessCheck", m_fail}, {"AuthzFreeContext", k_one}, {"AuthzFreeResourceManager", k_one},
     {"GetUserProfileDirectoryW", m_GetUserProfileDirectoryW}, {"NetShareEnum", m_err2}, {"NetApiBufferFree", k_zero},

@@ -7,7 +7,7 @@
 /* name: the 8.3 name, used to build paths. lname: the long name when the
  * folder has one (written by Windows or macOS), otherwise the same as name.
  * Paths may use either. */
-typedef struct { char name[13]; char lname[64]; u32 size; u8 is_dir; } fat_entry_t;
+typedef struct { char name[13]; char lname[256]; u32 size; u8 is_dir; u16 wdate, wtime; } fat_entry_t; /* wdate/wtime: last write, FAT format */
 
 int fat_mount(void);                       /* 0 when the USB disk has FAT32 */
 extern int fat_mounted;

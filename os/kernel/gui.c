@@ -545,7 +545,7 @@ static void draw_start(surface_t *s) {
 
 /* =============================================================== windows */
 #define WIN_BTN_KEY(w, b) (100000 + (int)((uptr)(w) & 0xFFFFF) * 4 + (b))
-static rect_t btn_rect(cw_window *w, int which) { /* 0 close, 1 minimize */
+static rect_t btn_rect(cw_window *w, int which) { /* 0 close, 1 maximize, 2 minimize */
     return (rect_t){w->x + w->w - 46 * (which + 1), w->y, 46, TITLE_H};
 }
 
@@ -564,26 +564,36 @@ static void draw_window(surface_t *s, cw_window *w, int active) {
     else fill_round(s, f.x, f.y, f.w, TITLE_H + 12, 10, C_TITLE_BG);
     blit_argb(s, icon_px(w->icon, 24), 24, 24, f.x + 10, f.y + 4);
     text_fit(s, FONT_UI, f.x + 42, f.y + 8, w->title, w->w - 42 - 100, active ? C_TEXT : 0xFF8A8F9C);
-    /* buttons */
-    for (int b = 0; b < 2; b++) {
+    /* buttons: close, maximize (grey when the window can't change size), minimize */
+    for (int b = 0; b < 3; b++) {
         rect_t r = btn_rect(w, b);
-        int hov = hover_key == WIN_BTN_KEY(w, b);
+        int hov = hover_key == WIN_BTN_KEY(w, b) && (b != 1 || w->resizable);
         u32 fg = active ? C_TEXT : 0xFF8A8F9C;
+        if (b == 1 && !w->resizable) fg = dark_mode ? 0xFF4A4F5C : 0xFFB8BCC6;
         if (hov) {
             if (b == 0) { fill_rect(s, r.x, r.y, r.w, r.h - 1, 0xFFC42B1C); fg = 0xFFFFFFFF; }
             else fill_rect(s, r.x, r.y, r.w, r.h - 1, C_HOVER);
-            if (b == 0) fill_round(s, r.x + r.w - 8, r.y, 8, 8, 0, 0xFFC42B1C);
+            if (b == 0 && !w->maximized) fill_round(s, r.x + r.w - 8, r.y, 8, 8, 0, 0xFFC42B1C);
         }
         int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
         if (b == 0) {
             draw_line(s, cx - 5, cy - 5, cx + 5, cy + 5, 1, fg);
             draw_line(s, cx - 5, cy + 5, cx + 5, cy - 5, 1, fg);
+        } else if (b == 1) {
+            if (w->maximized) { /* restore: two overlapping squares */
+                fill_rect(s, cx - 3, cy - 5, 8, 1, fg); fill_rect(s, cx + 4, cy - 5, 1, 8, fg);
+                fill_rect(s, cx - 5, cy - 3, 8, 1, fg); fill_rect(s, cx - 5, cy + 4, 8, 1, fg);
+                fill_rect(s, cx - 5, cy - 3, 1, 8, fg); fill_rect(s, cx + 2, cy - 3, 1, 8, fg);
+            } else {
+                fill_rect(s, cx - 5, cy - 5, 10, 1, fg); fill_rect(s, cx - 5, cy + 4, 10, 1, fg);
+                fill_rect(s, cx - 5, cy - 5, 1, 10, fg); fill_rect(s, cx + 4, cy - 5, 1, 10, fg);
+            }
         } else {
             fill_rect(s, cx - 5, cy, 11, 1, fg);
         }
     }
-    /* client area: square top, rounded bottom corners */
-    int r = 10, cy0 = f.y + TITLE_H;
+    /* client area: square top, rounded bottom corners (square when maximized, as in Windows 11) */
+    int r = w->maximized ? 0 : 10, cy0 = f.y + TITLE_H;
     for (int yy = 0; yy < w->h; yy++) {
         int inset = 0;
         int from_bottom = w->h - 1 - yy;
@@ -705,8 +715,8 @@ int win_resize(cw_window *w, int nw, int nh) {
         nw = imax(1, imin(nw, SCREEN_W));
         nh = imax(1, imin(nh, SCREEN_H));
     } else {
-        nw = imax(120, imin(nw, SCREEN_W - 20));
-        nh = imax(60, imin(nh, SCREEN_H - TASKBAR_H - TITLE_H - 20));
+        nw = imax(120, imin(nw, SCREEN_W));
+        nh = imax(60, imin(nh, SCREEN_H - TASKBAR_H - TITLE_H));
     }
     if (nw == w->w && nh == w->h) return 0;
     u32 *px = kmalloc((size_t)nw * nh * 4);
@@ -726,6 +736,25 @@ int win_resize(cw_window *w, int nw, int nh) {
     }
     invalidate_rect(frame_with_shadow(w));
     return 0;
+}
+
+void win_maximize(cw_window *w, int on) {
+    if (!win_alive(w) || !w->resizable || w->popup || on == w->maximized) return;
+    invalidate_rect(frame_with_shadow(w));
+    if (on) {
+        w->restore = (rect_t){w->x, w->y, w->w, w->h};
+        w->x = 0;
+        w->y = 0;
+        if (win_resize(w, SCREEN_W, SCREEN_H - TASKBAR_H - TITLE_H) != 0) { w->x = w->restore.x; w->y = w->restore.y; return; }
+    } else {
+        w->x = w->restore.x;
+        w->y = w->restore.y;
+        win_resize(w, w->restore.w, w->restore.h);
+    }
+    w->maximized = on;
+    invalidate_all();
+    cw_event ev = {.type = CW_RESIZE, .x = w->w, .y = w->h};
+    if (w->on_event) w->on_event(w, &ev);
 }
 void win_make_popup(cw_window *w) {
     if (!win_alive(w) || w->popup) return;
@@ -816,7 +845,7 @@ static int hit_hover(void) {
     cw_window *found = window_at(mx, my); /* topmost window under the cursor */
     if (found && found->popup) return -1;
     if (found) {
-        for (int b = 0; b < 2; b++)
+        for (int b = 0; b < 3; b++)
             if (rect_has(btn_rect(found, b), mx, my)) return WIN_BTN_KEY(found, b);
         return -1;
     }
@@ -919,7 +948,18 @@ static void mouse_down(int button) {
         if (!hit->popup && hit != top_window()) win_focus(hit);
         if (!hit->popup && my < hit->y + TITLE_H) {
             if (rect_has(btn_rect(hit, 0), mx, my)) { win_close(hit); return; }
-            if (rect_has(btn_rect(hit, 1), mx, my)) { hit->minimized = 1; invalidate_all(); return; }
+            if (rect_has(btn_rect(hit, 1), mx, my)) { win_maximize(hit, !hit->maximized); return; }
+            if (rect_has(btn_rect(hit, 2), mx, my)) { hit->minimized = 1; invalidate_all(); return; }
+            static cw_window *last_title;
+            static u32 last_title_ms;
+            if (last_title == hit && ticks_ms - last_title_ms < 450 && hit->resizable) { /* double click on the title */
+                last_title = NULL;
+                win_maximize(hit, !hit->maximized);
+                return;
+            }
+            last_title = hit;
+            last_title_ms = ticks_ms;
+            if (hit->maximized) return; /* a maximized window stays put */
             drag_win = hit;
             drag_dx = mx - hit->x;
             drag_dy = my - hit->y;
