@@ -33,17 +33,122 @@ static int wcopy(u16 *dst, int max, const char *s) { /* returns length in units,
     return n;
 }
 static WINAPI int m_fail(void) { last_error = 50; return 0; }   /* ERROR_NOT_SUPPORTED */
-static WINAPI u32 m_err2(void) { return 2; }                   /* ERROR_FILE_NOT_FOUND as a return value */
+static WINAPI u32 m_err2(void) { return 2; }
+static WINAPI u32 m_fail_code(void) { return 50; }              /* ERROR_NOT_SUPPORTED as a return value */                   /* ERROR_FILE_NOT_FOUND as a return value */
 static WINAPI u64 m_neg1(void) { return (u64)-1; }
 static WINAPI u32 m_hresult_fail(void) { return 0x80004001; }  /* E_NOTIMPL */
+
+/* ---- environment variables: one table for all programs ---- */
+static char *envv[64];
+static int nenv;
+static void env_init(void) {
+    static const char *def[] = {
+        "QT_QPA_PLATFORM=windows:fontengine=freetype", /* Qt draws text with its own FreeType: no DirectWrite here */
+        "USERNAME=usuario", "COMPUTERNAME=CHAMOWS", "USERPROFILE=C:\\CHAMOWS\\USUARIO",
+        "APPDATA=C:\\CHAMOWS\\APPDATA", "LOCALAPPDATA=C:\\CHAMOWS\\APPDATA", "SystemRoot=C:\\WINDOWS",
+        "windir=C:\\WINDOWS", "SystemDrive=C:", "OS=Windows_NT",
+    };
+    if (nenv) return;
+    for (u32 i = 0; i < sizeof def / sizeof def[0]; i++) {
+        u64 k = strlen(def[i]) + 1;
+        envv[nenv] = kmalloc(k);
+        memcpy(envv[nenv++], def[i], k);
+    }
+}
+static int env_find(const char *n) {
+    env_init();
+    u64 k = strlen(n);
+    for (int i = 0; i < nenv; i++) if (!c__strnicmp(envv[i], n, k) && envv[i][k] == '=') return i;
+    return -1;
+}
+static const char *env_get(const char *n) { int i = env_find(n); return i < 0 ? NULL : envv[i] + strlen(n) + 1; }
+static int env_set(const char *n, const char *v) {
+    int i = env_find(n);
+    if (i >= 0) { kfree(envv[i]); envv[i] = envv[--nenv]; }
+    if (!v || !*v) return 1;
+    if (nenv == 64) return 0;
+    char *e = kmalloc(strlen(n) + strlen(v) + 2);
+    if (!e) return 0;
+    ksnprintf(e, strlen(n) + strlen(v) + 2, "%s=%s", n, v);
+    envv[nenv++] = e;
+    return 1;
+}
+static WINAPI u32 m_GetEnvironmentVariableA(const char *n, char *b, u32 sz) {
+    const char *v = env_get(n);
+    if (!v) { last_error = 203; return 0; } /* ERROR_ENVVAR_NOT_FOUND */
+    u32 k = (u32)strlen(v);
+    if (!b || sz <= k) return k + 1;
+    memcpy(b, v, k + 1);
+    return k;
+}
+static WINAPI u32 m_GetEnvironmentVariableW(const u16 *n, u16 *b, u32 sz) {
+    char a[128];
+    w_to_u8(n, -1, a, sizeof a);
+    const char *v = env_get(a);
+    if (!v) { last_error = 203; return 0; }
+    u32 k = (u32)u8_to_w(v, NULL, 0);
+    if (!b || sz <= k) return k + 1;
+    u8_to_w(v, b, (int)sz);
+    return k;
+}
+static WINAPI int m_SetEnvironmentVariableA(const char *n, const char *v) { return env_set(n, v); }
+static WINAPI int m_SetEnvironmentVariableW(const u16 *n, const u16 *v) {
+    char a[128], b[1024];
+    w_to_u8(n, -1, a, sizeof a);
+    if (v) w_to_u8(v, -1, b, sizeof b);
+    return env_set(a, v ? b : NULL);
+}
+static WINAPI char *m_getenv(const char *n) { return (char *)env_get(n); }
+static WINAPI int m_getenv_s(u64 *len, char *b, u64 sz, const char *n) {
+    const char *v = env_get(n);
+    u64 k = v ? strlen(v) + 1 : 0;
+    if (len) *len = k;
+    if (!v) { if (b && sz) b[0] = 0; return 0; }
+    if (!b || !sz) return 0;
+    if (sz < k) return 34; /* ERANGE */
+    memcpy(b, v, k);
+    return 0;
+}
+static WINAPI int m__wgetenv_s(u64 *len, u16 *b, u64 sz, const u16 *n) {
+    char a[128];
+    w_to_u8(n, -1, a, sizeof a);
+    const char *v = env_get(a);
+    u64 k = v ? (u64)u8_to_w(v, NULL, 0) + 1 : 0;
+    if (len) *len = k;
+    if (!v) { if (b && sz) b[0] = 0; return 0; }
+    if (!b || !sz) return 0;
+    if (sz < k) return 34;
+    u8_to_w(v, b, (int)sz);
+    return 0;
+}
+static WINAPI u16 *m__wgetenv(const u16 *n) { /* each value gets its own UTF-16 copy, kept */
+    char a[128];
+    w_to_u8(n, -1, a, sizeof a);
+    const char *v = env_get(a);
+    if (!v) return NULL;
+    int k = u8_to_w(v, NULL, 0) + 1;
+    u16 *w = p_alloc(2ULL * (u64)k, 0);
+    if (w) u8_to_w(v, w, k);
+    return w;
+}
+static WINAPI int m__putenv_s(const char *n, const char *v) { return env_set(n, v) ? 0 : 22; }
+static WINAPI int m__wputenv_s(const u16 *n, const u16 *v) { return m_SetEnvironmentVariableW(n, v) ? 0 : 22; }
+static WINAPI u16 *m_GetEnvironmentStringsW(void) {
+    env_init();
+    int tot = 1;
+    for (int i = 0; i < nenv; i++) tot += u8_to_w(envv[i], NULL, 0) + 1;
+    u16 *w = p_alloc(2ULL * (u64)tot, 1), *o = w;
+    for (int i = 0; i < nenv; i++) o += u8_to_w(envv[i], o, tot) + 1;
+    *o = 0;
+    return w;
+}
+static WINAPI int m_FreeEnvironmentStringsW(u16 *w) { p_free(w); return 1; }
 
 /* ---- process and system ---- */
 static WINAPI void *m_EncodePointer(void *p) { return p; }
 static WINAPI u32 m_GetACP(void) { return 65001; }
 static WINAPI int m_GetCPInfo(u32 cp, u8 *info) { memset(info, 0, 20); *(u32 *)info = cp == 65001 || cp == 0 ? 4 : 1; info[4] = '?'; return 1; }
 static WINAPI void m_GetStartupInfoW(u8 *si) { memset(si, 0, 104); *(u32 *)si = 104; }
-static u16 env_empty[2];
-static WINAPI u16 *m_GetEnvironmentStringsW(void) { return env_empty; }
 static WINAPI void *m_LocalAlloc(u32 fl, u64 n) { return p_alloc(n ? n : 1, (fl & 0x40) != 0); }
 static WINAPI u32 m_GetActiveProcessorCount(u16 g) { return 1; }
 static WINAPI int m_GetExitCodeThread(u64 v, u32 *code) {
@@ -227,13 +332,27 @@ static WINAPI u32 m_MsgWaitForMultipleObjectsEx(u32 n, const u64 *hs, u32 ms, u3
             if (n && k_WaitForMultipleObjects(n, hs, 1, 0) == 0) return 0;
         } else
             for (u32 i = 0; i < n; i++) if (try_take(hs[i])) return i;
-        if (next_msg(&m, 0)) return n;
+        /* a 0 ms check without MWMO_INPUTAVAILABLE asks for *new* input only: a timer that fell
+         * due while the last empty PeekMessage yielded is not new (Qt's loop spins on it otherwise) */
+        if (ms == 0 && !(fl & 4) ? (cur->qcount || pending_paint(&m)) : next_msg(&m, 0)) return n;
         if (ms == 0 || (ms != 0xFFFFFFFF && ticks_ms - start >= ms)) return 0x102;
         flush_windows(cur);
         yield(W_RUN);
     }
 }
-static WINAPI u32 m_GetQueueStatus(u32 fl) { MSG m; return next_msg(&m, 0) ? 0x00FF00FF & (fl | fl << 16) : 0; }
+/* what kinds of messages are waiting: keys 1, mouse moves 2, buttons 4, posted 8, timers 0x10, paint 0x20 */
+static WINAPI u32 m_GetQueueStatus(u32 fl) {
+    u32 have = 0;
+    for (int i = 0; i < cur->qcount; i++) {
+        u32 msg = cur->q[(cur->qhead + i) % QMAX].message;
+        have |= msg >= 0x100 && msg <= 0x109 ? 1 : msg == 0x200 ? 2 : msg >= 0x201 && msg <= 0x20E ? 4 : 8;
+    }
+    MSG m;
+    if (pending_paint(&m)) have |= 0x20;
+    if (due_timer(cur, NULL, 0)) have |= 0x10;
+    have &= fl;
+    return have << 16 | have;
+}
 
 /* ---- work that runs later on its own thread: thread pool, timers ---- */
 typedef struct {
@@ -416,6 +535,7 @@ static WINAPI int m_SystemFunction036(u8 *buf, u32 n) { /* RtlGenRandom */
 }
 
 /* ---- COM, shell ---- */
+static WINAPI u32 m_DwmIsCompositionEnabled(int *on) { if (on) *on = 0; return 0; }
 static WINAPI u32 m_CoCreateGuid(u8 *g) { m_SystemFunction036(g, 16); g[7] = (u8)((g[7] & 0x0F) | 0x40); g[8] = (u8)((g[8] & 0x3F) | 0x80); return 0; }
 static WINAPI u32 m_CoInitializeEx(void *r, u32 fl) { return 0; }
 static WINAPI void m_CoTaskMemFree(void *p) { p_free(p); }
@@ -455,7 +575,11 @@ static const struct { const char *name; void *fn; } exports_misc[] = {
     /* kernel32 */
     {"EncodePointer", m_EncodePointer}, {"DecodePointer", m_EncodePointer}, {"GetACP", m_GetACP}, {"GetOEMCP", m_GetACP},
     {"GetCPInfo", m_GetCPInfo}, {"GetStartupInfoW", m_GetStartupInfoW}, {"GetEnvironmentStringsW", m_GetEnvironmentStringsW},
-    {"FreeEnvironmentStringsW", k_one}, {"LocalAlloc", m_LocalAlloc}, {"GetNativeSystemInfo", k_GetSystemInfo},
+    {"FreeEnvironmentStringsW", m_FreeEnvironmentStringsW},
+    {"GetEnvironmentVariableA", m_GetEnvironmentVariableA}, {"GetEnvironmentVariableW", m_GetEnvironmentVariableW},
+    {"SetEnvironmentVariableA", m_SetEnvironmentVariableA}, {"SetEnvironmentVariableW", m_SetEnvironmentVariableW},
+    {"getenv", m_getenv}, {"getenv_s", m_getenv_s}, {"_wgetenv_s", m__wgetenv_s}, {"_wgetenv", m__wgetenv},
+    {"_putenv_s", m__putenv_s}, {"_wputenv_s", m__wputenv_s}, {"LocalAlloc", m_LocalAlloc}, {"GetNativeSystemInfo", k_GetSystemInfo},
     {"GetActiveProcessorCount", m_GetActiveProcessorCount}, {"GetExitCodeThread", m_GetExitCodeThread},
     {"GetExitCodeProcess", m_GetExitCodeProcess}, {"GetProcessId", m_GetProcessId}, {"GetProcessGroupAffinity", m_GetProcessGroupAffinity},
     {"GetSystemDirectoryW", m_GetSystemDirectoryW}, {"GetComputerNameExW", m_GetComputerNameExW}, {"GetLongPathNameW", m_GetLongPathNameW},
@@ -518,7 +642,15 @@ static const struct { const char *name; void *fn; } exports_misc[] = {
     {"SysStringLen", m_SysStringLen}, {"GetErrorInfo", m_GetErrorInfo}, {"SetErrorInfo", k_zero},
     {"VariantInit", k_zero}, {"VariantClear", k_zero},
     {"SHGetKnownFolderPath", m_SHGetKnownFolderPath}, {"SHCreateItemFromParsingName", m_hresult_fail}, {"ShellExecuteExW", m_fail},
-    {"RoGetActivationFactory", m_hresult_fail}, {"RoOriginateLanguageException", k_zero},
+    {"RoGetActivationFactory", m_hresult_fail},
+    /* graphics and text through COM: not here, and saying so lets programs pick their fallback */
+    {"CreateDXGIFactory", m_hresult_fail}, {"CreateDXGIFactory1", m_hresult_fail}, {"CreateDXGIFactory2", m_hresult_fail},
+    {"D3D11CreateDevice", m_hresult_fail}, {"D3D11CreateDeviceAndSwapChain", m_hresult_fail}, {"D3D12CreateDevice", m_hresult_fail},
+    {"D3D12GetDebugInterface", m_hresult_fail}, {"D3D12SerializeVersionedRootSignature", m_hresult_fail},
+    {"Direct3DCreate9", k_zero}, {"Direct3DCreate9Ex", m_hresult_fail}, {"DWriteCreateFactory", m_hresult_fail},
+    {"D2D1CreateFactory", m_hresult_fail}, {"DCompositionCreateDevice", m_hresult_fail}, {"DCompositionCreateDevice2", m_hresult_fail},
+    {"DwmFlush", m_hresult_fail}, {"DwmIsCompositionEnabled", m_DwmIsCompositionEnabled}, {"DwmGetWindowAttribute", m_hresult_fail},
+    {"WindowsCreateStringReference", m_hresult_fail}, {"WindowsCreateString", m_hresult_fail}, {"WindowsDeleteString", k_zero}, {"RoOriginateLanguageException", k_zero},
     {"ucnv_open", m_ucnv_open}, {"ucnv_countAvailable", k_zero}, {"ucnv_close", k_zero}, {"ucnv_getAvailableName", k_zero},
     /* winmm */
     {"timeSetEvent", m_timeSetEvent}, {"timeKillEvent", m_timeKillEvent},

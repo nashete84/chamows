@@ -17,7 +17,14 @@ typedef struct {
     u8 *data;
     u64 size, cap, pos;
     int can_read, can_write, append, dirty, eof, err, ungot;
+    void *next; /* all open files, so a second handle sees unsaved writes */
 } wfile_t;
+static wfile_t *wf_open_list;
+static int wf_flush(wfile_t *f);
+/* save what other handles wrote to this file, before it is opened or looked at again */
+static void wf_sync_path(const char *fp) {
+    for (wfile_t *f = wf_open_list; f; f = f->next) if (f->dirty && !stricmp_(f->path, fp)) wf_flush(f);
+}
 
 typedef struct {
     u32 magic;
@@ -84,7 +91,7 @@ static void win_path(const char *fp, char *out, int n) {
     for (int i = 3; i < k && out[i]; i++) if (out[i] == '/') out[i] = '\\';
 }
 
-static int fstat_path(const char *fp, fat_entry_t *e) { return fat_mounted ? fat_stat(fp, e) : -1; }
+static int fstat_path(const char *fp, fat_entry_t *e) { wf_sync_path(fp); return fat_mounted ? fat_stat(fp, e) : -1; }
 
 /* ---- open files ---- */
 static int wf_flush(wfile_t *f) {
@@ -106,6 +113,7 @@ static int wf_reserve(wfile_t *f, u64 need) {
 }
 static void wf_close(wfile_t *f) {
     wf_flush(f);
+    for (wfile_t **pp = &wf_open_list; *pp; pp = (wfile_t **)&(*pp)->next) if (*pp == f) { *pp = f->next; break; }
     f->magic = 0;
     if (f->data) kfree(f->data);
     kfree(f);
@@ -136,6 +144,8 @@ static wfile_t *wf_open(const char *fp, char how, int rd, int wr) {
         if (fat_write(fp, "", 0) != 0) { kfree(f); last_error = 5; return NULL; }
     }
     if (how == 'a') { f->append = 1; f->pos = f->size; }
+    f->next = wf_open_list;
+    wf_open_list = f;
     return f;
 }
 static u64 wf_read(wfile_t *f, void *buf, u64 n) {

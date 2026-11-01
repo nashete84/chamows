@@ -235,6 +235,114 @@ static WINAPI double r_frexp(double x, int *e) {
     return x;
 }
 
+
+/* the rest of math.h, mostly through the double versions */
+static WINAPI double r_trunc(double x) { return x < 0 ? -c_floor(-x) : c_floor(x); }
+static WINAPI double r_fmod(double a, double b) { if (b == 0) return __builtin_nan(""); double q = r_trunc(a / b); return a - q * b; }
+static WINAPI double r_remainder(double a, double b) { if (b == 0) return __builtin_nan(""); double q = r_round(a / b); return a - q * b; }
+static WINAPI double r_modf(double x, double *ip) { double t = r_trunc(x); if (ip) *ip = t; return x - t; }
+static WINAPI double r_log2(double x) { double r; __asm__("fld1; fxch; fyl2x" : "=t"(r) : "0"(x)); return r; }
+static WINAPI double r_cbrt(double x) { if (x == 0) return 0; double r = r_pow(x < 0 ? -x : x, 1.0 / 3); r = r - (r * r * r - (x < 0 ? -x : x)) / (3 * r * r); return x < 0 ? -r : r; }
+static WINAPI double r_expm1(double x) { return (x > -1e-5 && x < 1e-5) ? x + x * x / 2 : exp_(x) - 1; }
+static WINAPI double r_log1p(double x) { return (x > -1e-5 && x < 1e-5) ? x - x * x / 2 : r_log(1 + x); }
+static WINAPI double r_asinh(double x) { return r_log(x + c_sqrt(x * x + 1)); }
+static WINAPI double r_acosh(double x) { return r_log(x + c_sqrt(x * x - 1)); }
+static WINAPI double r_atanh(double x) { return 0.5 * r_log((1 + x) / (1 - x)); }
+static WINAPI int r__dsign(double x) { u64 b; memcpy(&b, &x, 8); return (int)(b >> 63); }
+static WINAPI double r_fmax(double a, double b) { return a != a ? b : b != b ? a : a > b ? a : b; }
+static WINAPI double r_fmin(double a, double b) { return a != a ? b : b != b ? a : a < b ? a : b; }
+static WINAPI i64 r_llround(double x) { return (i64)r_round(x); }
+static WINAPI i64 r_lrint(double x) { double f = c_floor(x), d = x - f; if (d > 0.5 || (d == 0.5 && ((i64)f & 1))) f += 1; return (i64)f; }
+static WINAPI double r_rint(double x) { return (double)r_lrint(x); }
+#define F1(n, d) static WINAPI float r_##n(float x) { return (float)d((double)x); }
+F1(floorf, c_floor) F1(sqrtf, c_sqrt) F1(sinf, c_sin) F1(cosf, c_cos) F1(tanf, c_tan) F1(asinf, c_asin) F1(acosf, c_acos)
+F1(atanf, c_atan) F1(expf, r_exp) F1(log2f, r_log2) F1(log10f, c_log10) F1(truncf, r_trunc) F1(roundf, r_round) F1(fabsf, c_fabs)
+static WINAPI float r_powf(float a, float b) { return (float)r_pow(a, b); }
+static WINAPI float r_atan2f(float a, float b) { return (float)c_atan2_(a, b); }
+static WINAPI float r__hypotf(float a, float b) { return (float)r_hypot(a, b); }
+static WINAPI float r_fmodf(float a, float b) { return (float)r_fmod(a, b); }
+static WINAPI float r_modff(float x, float *ip) { double i; float f = (float)r_modf(x, &i); if (ip) *ip = (float)i; return f; }
+static WINAPI i32 r_lroundf(float x) { return (i32)r_round(x); }
+
+/* sscanf: numbers, strings, characters, sets and %n */
+static int scan_core(const char *in, const char *f, __builtin_ms_va_list ap) {
+    const char *s = in;
+    int n = 0;
+    for (; *f; f++) {
+        if (*f == ' ' || (*f >= 9 && *f <= 13)) { while (*s == ' ' || (*s >= 9 && *s <= 13)) s++; continue; }
+        if (*f != '%') { if (*s != *f) break; s++; continue; }
+        f++;
+        if (*f == '%') { if (*s != '%') break; s++; continue; }
+        int skip = 0, width = 0, lng = 0, shrt = 0;
+        if (*f == '*') { skip = 1; f++; }
+        while (*f >= '0' && *f <= '9') width = width * 10 + (*f++ - '0');
+        for (;; f++) {
+            if (*f == 'l') lng++; else if (*f == 'h') shrt++; else if (*f == 'L' || *f == 'z' || *f == 'j' || *f == 'I') lng = 2;
+            else break;
+            if (*f == 'I' && f[1] == '6' && f[2] == '4') f += 2;
+        }
+        char c = *f;
+        if (c == 'n') { if (!skip) *__builtin_va_arg(ap, int *) = (int)(s - in); continue; }
+        if (c != 'c' && c != '[') while (*s == ' ' || (*s >= 9 && *s <= 13)) s++;
+        if (!*s) return n ? n : -1;
+        char tmp[80];
+        int k = 0, lim = width ? width : 79;
+        if (c == 'd' || c == 'i' || c == 'u' || c == 'x' || c == 'X' || c == 'o' || c == 'p') {
+            if ((*s == '-' || *s == '+') && k < lim) tmp[k++] = *s++;
+            while (k < lim && k < 79 && (c_isalnum(*s))) tmp[k++] = *s++;
+            tmp[k] = 0;
+            char *e;
+            int base = c == 'x' || c == 'X' || c == 'p' ? 16 : c == 'o' ? 8 : c == 'i' ? 0 : 10;
+            u64 v = c_strtoui64(tmp, &e, base);
+            if (e == tmp) break;
+            s -= k - (e - tmp);
+            if (!skip) {
+                void *p = __builtin_va_arg(ap, void *);
+                if (lng >= 2 || c == 'p') *(u64 *)p = v; else if (shrt == 1) *(u16 *)p = (u16)v; else if (shrt >= 2) *(u8 *)p = (u8)v; else *(u32 *)p = (u32)v;
+                n++;
+            }
+        } else if (c == 'f' || c == 'e' || c == 'g' || c == 'E' || c == 'G' || c == 'a') {
+            char *e;
+            double v = r_strtod(s, &e);
+            if (e == s) break;
+            s = e;
+            if (!skip) { void *p = __builtin_va_arg(ap, void *); if (lng) *(double *)p = v; else *(float *)p = (float)v; n++; }
+        } else if (c == 's' || c == 'c' || c == '[') {
+            char set[256] = {0};
+            int neg = 0;
+            if (c == '[') {
+                f++;
+                if (*f == '^') { neg = 1; f++; }
+                if (*f == ']') { set[']'] = 1; f++; }
+                for (; *f && *f != ']'; f++) {
+                    if (f[1] == '-' && f[2] && f[2] != ']') { for (int ch = (u8)f[0]; ch <= (u8)f[2]; ch++) set[ch] = 1; f += 2; }
+                    else set[(u8)*f] = 1;
+                }
+            }
+            char *d = skip ? NULL : __builtin_va_arg(ap, char *);
+            int cnt = 0, max = c == 'c' ? (width ? width : 1) : (width ? width : 0x7FFFFFFF);
+            while (*s && cnt < max) {
+                if (c == 's' && (*s == ' ' || (*s >= 9 && *s <= 13))) break;
+                if (c == '[' && (set[(u8)*s] != 0) == neg) break;
+                if (d) d[cnt] = *s;
+                cnt++; s++;
+            }
+            if (!cnt) break;
+            if (d && c != 'c') d[cnt] = 0;
+            if (d) n++;
+        } else break;
+    }
+    return n;
+}
+static WINAPI int r__stdio_common_vsscanf(u64 opt, const char *in, u64 len, const char *f, void *loc, __builtin_ms_va_list ap) { return scan_core(in, f, ap); }
+static WINAPI int r_sscanf(const char *in, const char *f, ...) {
+    __builtin_ms_va_list ap;
+    __builtin_ms_va_start(ap, f);
+    int n = scan_core(in, f, ap);
+    __builtin_ms_va_end(ap);
+    return n;
+}
+
 /* ---- time ---- */
 static const char *wday_n[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 static const char *mon_n[] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
@@ -275,7 +383,6 @@ static WINAPI int r__localtime64_s(void *tm, const i64 *t) { memcpy(tm, c__gmtim
 static WINAPI int r_rand_s(u32 *v) { *v = (u32)c_rand() << 17 ^ (u32)c_rand() << 4 ^ (u32)ticks_ms ^ (u32)c_rand(); return 0; }
 
 /* ---- environment and files ---- */
-static WINAPI int r__wgetenv_s(u64 *n, u16 *b, u64 sz, const u16 *name) { if (n) *n = 0; if (b && sz) b[0] = 0; return 0; }
 static WINAPI int r__getdrive(void) { return 3; }
 static WINAPI int r__wchdir(const u16 *d) { return f_SetCurrentDirectoryW(d) ? 0 : -1; }
 static WINAPI u16 *r__wgetdcwd(int drive, u16 *b, int n) { return c__wgetcwd(b, n); }
@@ -304,10 +411,18 @@ static const struct { const char *name; void *fn; } exports_crt[] = {
     {"strtod", r_strtod}, {"strtof", r_strtof}, {"atof", r_strtod},
     {"_dclass", r__dclass}, {"_ldclass", r__dclass}, {"_fdclass", r__fdclass}, {"atan2", c_atan2_}, {"ceilf", r_ceilf},
     {"copysign", r_copysign}, {"frexp", r_frexp}, {"hypot", r_hypot}, {"ldexp", r_ldexp}, {"log", r_log}, {"logf", r_logf},
-    {"pow", r_pow}, {"round", r_round}, {"exp", r_exp},
+    {"pow", r_pow}, {"round", r_round}, {"exp", r_exp}, {"trunc", r_trunc}, {"fmod", r_fmod}, {"remainder", r_remainder},
+    {"modf", r_modf}, {"log2", r_log2}, {"cbrt", r_cbrt}, {"expm1", r_expm1}, {"log1p", r_log1p}, {"asinh", r_asinh},
+    {"acosh", r_acosh}, {"atanh", r_atanh}, {"_dsign", r__dsign}, {"_ldsign", r__dsign}, {"fmax", r_fmax}, {"fmin", r_fmin},
+    {"llround", r_llround}, {"lround", r_llround}, {"lrint", r_lrint}, {"llrint", r_lrint}, {"rint", r_rint}, {"nearbyint", r_rint},
+    {"floorf", r_floorf}, {"sqrtf", r_sqrtf}, {"sinf", r_sinf}, {"cosf", r_cosf}, {"tanf", r_tanf}, {"asinf", r_asinf},
+    {"acosf", r_acosf}, {"atanf", r_atanf}, {"expf", r_expf}, {"log2f", r_log2f}, {"log10f", r_log10f}, {"truncf", r_truncf},
+    {"roundf", r_roundf}, {"fabsf", r_fabsf}, {"powf", r_powf}, {"atan2f", r_atan2f}, {"_hypotf", r__hypotf}, {"hypotf", r__hypotf},
+    {"fmodf", r_fmodf}, {"modff", r_modff}, {"lroundf", r_lroundf},
+    {"__stdio_common_vsscanf", r__stdio_common_vsscanf}, {"sscanf", r_sscanf},
     {"_Getdays", r__Getdays}, {"_Getmonths", r__Getmonths}, {"_Gettnames", r__Gettnames}, {"_W_Getdays", r__W_Getdays},
     {"_W_Getmonths", r__W_Getmonths}, {"_W_Gettnames", r__Gettnames}, {"_Strftime", k_zero}, {"_Wcsftime", k_zero},
     {"_get_tzname", r__get_tzname}, {"_localtime64_s", r__localtime64_s}, {"_tzset", k_zero}, {"rand_s", r_rand_s},
-    {"_putenv_s", k_zero}, {"_wgetenv_s", r__wgetenv_s}, {"_wgetdcwd", r__wgetdcwd}, {"_getdrive", r__getdrive},
+    {"_wgetdcwd", r__wgetdcwd}, {"_getdrive", r__getdrive},
     {"_wchdir", r__wchdir}, {"_wchmod", k_zero}, {"_wrmdir", r_minus1},
 };

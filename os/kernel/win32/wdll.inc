@@ -198,6 +198,7 @@ static int link_imports(w32proc_t *p, w32mod_t *m, int depth, const char **err) 
                 if (unknown++ < 12) klog("exe: %s!%s no existe en Chamows (devolverá 0)\n", base, name);
                 fn = unknown_thunk(name);
             }
+            else if (dep == &sys_mod) fn = trace_thunk(name, fn);
             *(u64 *)(img + iat + 8 * k) = (u64)fn;
         }
     }

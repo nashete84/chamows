@@ -33,6 +33,9 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
   Probado con el SDL2.dll oficial.
 - **Hilos con turnos**: si un hilo de un .exe no suelta la CPU, el reloj se la quita cada 20 ms;
   el escritorio no se congela y los cerrojos de Windows (secciones críticas, SRW, variables de condición) funcionan.
+- **Qt 6 (paso 5 hacia Telegram)**: las DLL oficiales de Qt 6.12 (MSVC) funcionan. `rcc.exe` compila
+  archivos .qrc y **Qt Designer abre y se usa**: menús desplegables, diálogos, ratón y teclado.
+  Las fuentes TrueType se ponen en `WINDOWS\FONTS` del pendrive (por ejemplo DejaVu Sans).
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.

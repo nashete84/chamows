@@ -39,7 +39,7 @@ typedef struct w32win {
     int activated, hidden;   /* hidden: HWND_MESSAGE windows, never on screen */
     struct { char name[32]; u64 v; } props[8];
     dc_t dc;
-    wtimer_t timers[8];
+    wtimer_t timers[48];
     struct w32win *next;
 } w32win_t;
 #define WIN_MAGIC 0x57494E44
@@ -89,7 +89,7 @@ typedef struct w32proc {
     MSG q[QMAX];
     int qhead, qcount;
     w32win_t *wins;
-    wclass_t classes[16];
+    wclass_t classes[48];
     int nclasses;
     blk_t *blocks;
     /* console */
@@ -580,7 +580,7 @@ static w32win_t *new_win(void) {
     return w;
 }
 static u16 register_class(const char *name, WNDPROC proc, u64 bg) {
-    if (cur->nclasses == 16) return 0;
+    if (cur->nclasses == 48) { klog("exe: demasiadas clases de ventana\n"); return 0; }
     wclass_t *c = &cur->classes[cur->nclasses++];
     if ((uptr)name < 0x10000) ksnprintf(c->name, sizeof c->name, "#%u", (unsigned)(uptr)name);
     else strncpy0(c->name, name, sizeof c->name);
@@ -599,6 +599,8 @@ static wclass_t *find_class(const char *name) {
     }
     return NULL;
 }
+/* WS_POPUP without a caption or sizing border: drawn with no Chamows frame */
+static int is_popup(u32 style) { return (style & 0x80000000) && !(style & 0xC40000); }
 static WINAPI void *u_CreateWindowExA(u32 ex, const char *cls, const char *title, u32 style, int x, int y, int w, int h,
                                       void *parent, void *menu, void *inst, void *param) {
     wclass_t *c = find_class(cls);
@@ -618,6 +620,14 @@ static WINAPI void *u_CreateWindowExA(u32 ex, const char *cls, const char *title
     to_utf8(title ? title : "", title ? (int)strlen(title) : 0, t, sizeof t);
     win->cw = win_create(t, cwid, chei, win_event, win, cur->icon);
     if (!win->cw) { win->destroyed = 1; return NULL; }
+    if (!(style & 0x10000000)) win_show(win->cw, 0); /* no WS_VISIBLE: hidden until ShowWindow */
+    if (is_popup(style)) { /* menus, tooltips: no frame, exact size and place */
+        win_make_popup(win->cw);
+        if (w > 0 && w != (int)0x80000000 && h > 0) win_resize(win->cw, w, h);
+        if (x != (int)0x80000000) win_place(win->cw, x, y);
+        cwid = win->cw->w;
+        chei = win->cw->h;
+    }
     if (win->bg) fill_rect(&win->cw->surf, 0, 0, cwid, chei, win->bg);
     win->dirty = win->erase = 1;
     u64 cs[10] = {(u64)param};
@@ -670,7 +680,22 @@ static int pending_paint(MSG *m) {
 static void timer_popped(MSG *m) {
     w32win_t *w = W(m->hwnd);
     if (m->message == 0x113 && w)
-        for (int i = 0; i < 8; i++) if (w->timers[i].used && w->timers[i].id == m->wparam) w->timers[i].pending = 0;
+        for (int i = 0; i < 48; i++) if (w->timers[i].used && w->timers[i].id == m->wparam) w->timers[i].pending = 0;
+}
+/* WM_TIMER is made when it is asked for, like on Windows: only when nothing
+ * else is waiting, and never piling up in the queue. */
+static int due_timer(w32proc_t *p, MSG *m, int remove) {
+    for (w32win_t *w = p->wins; w; w = w->next) {
+        if (w->destroyed) continue;
+        for (int i = 0; i < 48; i++) {
+            wtimer_t *t = &w->timers[i];
+            if (!t->used || (i32)(ticks_ms - t->next) < 0) continue;
+            if (m) *m = (MSG){w, 0x113, t->id, 0, ticks_ms, 0, 0, 0};
+            if (remove) { t->next = ticks_ms + t->every; }
+            return 1;
+        }
+    }
+    return 0;
 }
 static int next_msg(MSG *m, int remove) {
     if (cur->qcount) {
@@ -684,7 +709,7 @@ static int next_msg(MSG *m, int remove) {
         if (remove) cur->quit = 0;
         return 1;
     }
-    return 0;
+    return due_timer(cur, m, remove);
 }
 static WINAPI int u_GetMessageA(MSG *m, void *h, u32 a, u32 b) {
     flush_windows(cur);
@@ -731,15 +756,15 @@ static WINAPI int u_GetClientRect(void *h, RECT *r) {
     if (w && w->cw) { r->right = w->cw->w; r->bottom = w->cw->h; }
     return 1;
 }
-static WINAPI int u_AdjustWindowRect(RECT *r, u32 style, int menu) { r->left -= 8; r->right += 8; r->top -= 31; r->bottom += 8; return 1; }
+static WINAPI int u_AdjustWindowRect(RECT *r, u32 style, int menu) { if (is_popup(style)) return 1; r->left -= 8; r->right += 8; r->top -= 31; r->bottom += 8; return 1; }
 static WINAPI int u_AdjustWindowRectEx(RECT *r, u32 style, int menu, u32 ex) { return u_AdjustWindowRect(r, style, menu); }
 static WINAPI u64 u_SetTimer(void *h, u64 id, u32 ms, void *fn) {
     w32win_t *w = W(h);
     if (!w) return 0;
     int slot = -1;
-    for (int i = 0; i < 8; i++) if (w->timers[i].used && w->timers[i].id == id) slot = i;
-    for (int i = 0; i < 8 && slot < 0; i++) if (!w->timers[i].used) slot = i;
-    if (slot < 0) return 0;
+    for (int i = 0; i < 48; i++) if (w->timers[i].used && w->timers[i].id == id) slot = i;
+    for (int i = 0; i < 48 && slot < 0; i++) if (!w->timers[i].used) slot = i;
+    if (slot < 0) { klog("exe: demasiados temporizadores en una ventana\n"); return 0; }
     if (ms < 10) ms = 10;
     w->timers[slot] = (wtimer_t){id, ms, ticks_ms + ms, 1, 0};
     (void)fn;
@@ -747,7 +772,7 @@ static WINAPI u64 u_SetTimer(void *h, u64 id, u32 ms, void *fn) {
 }
 static WINAPI int u_KillTimer(void *h, u64 id) {
     w32win_t *w = W(h);
-    if (w) for (int i = 0; i < 8; i++) if (w->timers[i].id == id) w->timers[i].used = 0;
+    if (w) for (int i = 0; i < 48; i++) if (w->timers[i].id == id) w->timers[i].used = 0;
     return 1;
 }
 static WINAPI int u_GetSystemMetrics(int i) { return i == 0 ? SCREEN_W : i == 1 ? SCREEN_H - TASKBAR_H : 0; }
@@ -1145,6 +1170,49 @@ static void *unknown_thunk(const char *name) {
     return t;
 }
 
+/* Call tracing, for finding out what a program expects: with W32_TRACE set to 1
+ * every Windows function the program imports from Chamows logs its name and
+ * first two arguments ("exe> Name(a, b)"), up to TRACE_MAX lines. */
+#define W32_TRACE 0
+#define TRACE_MAX 40000
+static int trace_lines;
+__attribute__((ms_abi)) void trace_log(const char *name, u64 a, u64 b, void *ret) {
+    static const char *quiet[] = {"TlsGetValue", "TlsSetValue", "EnterCriticalSection", "LeaveCriticalSection", "HeapAlloc",
+        "HeapFree", "HeapReAlloc", "malloc", "free", "realloc", "calloc", "memcpy", "memmove", "memset", "memcmp", "strlen",
+        "wcslen", "GetLastError", "SetLastError", "AcquireSRWLockExclusive", "ReleaseSRWLockExclusive", "AcquireSRWLockShared",
+        "ReleaseSRWLockShared", "FlsGetValue", "_errno", "GetCurrentThreadId", "QueryPerformanceCounter", "TryAcquireSRWLockExclusive",
+        "_aligned_malloc", "_aligned_free", "ceil", "floor", "ceilf", "floorf", "powf", "GetForegroundWindow", "GetSystemMetricsForDpi", "SystemParametersInfoForDpi", "strnlen", "_wgetenv_s", "strcmp", "strncmp", "WakeAllConditionVariable", "WakeConditionVariable", NULL};
+    for (int i = 0; quiet[i]; i++) if (strcmp(quiet[i], name) == 0) return;
+    if (trace_lines++ < TRACE_MAX) klog("exe> %s(%x, %x) desde %x\n", name, (u32)a, (u32)b, (u32)(uptr)ret);
+}
+/* Saves the argument registers, logs, restores them and jumps to the function (in r11). */
+__attribute__((naked)) static void trace_stub(void) {
+    __asm__ volatile(
+        "push %rcx\n\tpush %rdx\n\tpush %r8\n\tpush %r9\n\tpush %r11\n\t"
+        "sub $0x60, %rsp\n\t"
+        "movdqu %xmm0, 0x20(%rsp)\n\tmovdqu %xmm1, 0x30(%rsp)\n\tmovdqu %xmm2, 0x40(%rsp)\n\tmovdqu %xmm3, 0x50(%rsp)\n\t"
+        "mov 0x88(%rsp), %r9\n\t"          /* return address of the program's call */
+        "mov %rdx, %r8\n\tmov %rcx, %rdx\n\tmov %r10, %rcx\n\t"
+        "call trace_log\n\t"
+        "movdqu 0x20(%rsp), %xmm0\n\tmovdqu 0x30(%rsp), %xmm1\n\tmovdqu 0x40(%rsp), %xmm2\n\tmovdqu 0x50(%rsp), %xmm3\n\t"
+        "add $0x60, %rsp\n\t"
+        "pop %r11\n\tpop %r9\n\tpop %r8\n\tpop %rdx\n\tpop %rcx\n\t"
+        "jmp *%r11");
+}
+extern char _text_end[];
+static void *trace_thunk(const char *name, void *fn) {
+    if (!W32_TRACE || !fn || (char *)fn >= _text_end) return fn; /* variables are left alone */
+    u32 n = (u32)strlen(name) + 1;
+    u8 *t = kmalloc(36 + n);
+    if (!t) return fn;
+    memcpy(t + 36, name, n);
+    t[0] = 0x49; t[1] = 0xBA; *(u64 *)(t + 2) = (u64)(t + 36);       /* mov r10, name */
+    t[10] = 0x49; t[11] = 0xBB; *(u64 *)(t + 12) = (u64)fn;          /* mov r11, fn */
+    t[20] = 0x48; t[21] = 0xB8; *(u64 *)(t + 22) = (u64)trace_stub;  /* mov rax, stub */
+    t[30] = 0xFF; t[31] = 0xE0;                                       /* jmp rax */
+    return t;
+}
+
 static const struct { const char *name; void *fn; } exports[] = {
     /* kernel32 */
     {"ExitProcess", k_ExitProcess}, {"GetModuleHandleA", k_GetModuleHandleA}, {"GetModuleHandleW", k_GetModuleHandleA},
@@ -1325,7 +1393,16 @@ static WINAPI u32 k_GetModuleFileNameW(void *m, u16 *out, u32 n) {
 static WINAPI int k_GetModuleHandleExW(u32 f, const void *n, void **out) { *out = cur->image; return 1; }
 static WINAPI int k_lstrlenW(const u16 *s) { int n = 0; while (s && s[n]) n++; return n; }
 static WINAPI int k_MulDiv(int a, int b, int c) { return c ? (int)((i64)a * b / c) : -1; }
-static WINAPI void k_OutputDebugStringW(const u16 *s) { char b[200]; int i = 0; for (; s[i] && i < 199; i++) b[i] = (char)s[i]; b[i] = 0; klog("exe: %s\n", b); }
+static WINAPI void k_OutputDebugStringW(const u16 *s) { /* long messages in pieces of 200 */
+    char b[201];
+    int i = 0;
+    while (s[i]) {
+        int k = 0;
+        for (; s[i] && k < 200; i++, k++) b[k] = s[i] < 128 ? (char)s[i] : '?';
+        b[k] = 0;
+        klog("exe: %s\n", b);
+    }
+}
 static WINAPI int k_WriteConsoleW(u64 h, const u16 *buf, u32 n, u32 *w, void *r) {
     char tmp[256];
     for (u32 i = 0; i < n;) { u32 k = 0; for (; k < 255 && i < n; k++, i++) tmp[k] = buf[i] < 256 ? (char)buf[i] : '?'; con_write(tmp, (int)k); }
@@ -1537,6 +1614,8 @@ __attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
 #include "wsync.inc"
 #include "wcrt.inc"
 #include "wmisc.inc"
+#include "wuser.inc"
+#include "wfont.inc"
 
 static const struct { const char *name; void *fn; } exports2[] = {
     {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
@@ -1597,7 +1676,7 @@ static const struct { const char *name; void *fn; } exports2[] = {
 /* A function of the Win32 layer, by name; NULL if Chamows does not have it. */
 static void *builtin_lookup(const char *name) {
 #define LOOK(t) for (u32 j = 0; j < sizeof t / sizeof t[0]; j++) if (strcmp(t[j].name, name) == 0) return t[j].fn;
-    LOOK(exports_seh) LOOK(exports_sync) LOOK(exports_crt) LOOK(exports_misc) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
+    LOOK(exports_seh) LOOK(exports_sync) LOOK(exports_crt) LOOK(exports_font) LOOK(exports_misc) LOOK(exports_user) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
 #undef LOOK
     return NULL;
 }
@@ -1768,7 +1847,7 @@ static int ready(w32proc_t *p, w32thread_t *t) {
     case W_MSG: {
         if (p->qcount || p->quit) return 1;
         for (w32win_t *w = p->wins; w; w = w->next) if (w->dirty && !w->destroyed && w->cw) return 1;
-        return 0;
+        return due_timer(p, NULL, 0);
     }
     case W_SLEEP: return (i32)(ticks_ms - t->wake_at) >= 0;
     case W_BOX: return !p->box_open;
@@ -1816,14 +1895,6 @@ void win32_poll(void) {
             pp = &p->next;
             continue;
         }
-        for (w32win_t *w = p->wins; w; w = w->next)
-            for (int i = 0; i < 8; i++) {
-                wtimer_t *t = &w->timers[i];
-                if (t->used && !w->destroyed && (i32)(ticks_ms - t->next) >= 0) {
-                    t->next = ticks_ms + t->every;
-                    if (!t->pending) { t->pending = 1; post(p, w, 0x113, t->id, 0); }
-                }
-            }
         wsock_poll(p);
         for (w32thread_t *t = p->threads; t && !p->done; t = t->next) {
             if (t->done || !ready(p, t)) continue;

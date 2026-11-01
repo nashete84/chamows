@@ -69,7 +69,8 @@ void invalidate_rect(rect_t r) {
     if (!rect_empty(r)) dirty = rect_union(dirty, r);
 }
 static void invalidate_all(void) { invalidate_rect((rect_t){0, 0, SCREEN_W, SCREEN_H}); }
-static rect_t frame_rect(cw_window *w) { return (rect_t){w->x, w->y, w->w, w->h + TITLE_H}; }
+static int tbar(const cw_window *w) { return w->popup ? 0 : TITLE_H; } /* title bar height */
+static rect_t frame_rect(cw_window *w) { return (rect_t){w->x, w->y, w->w, w->h + tbar(w)}; }
 static rect_t frame_with_shadow(cw_window *w) {
     rect_t r = frame_rect(w);
     return (rect_t){r.x - 8, r.y - 8, r.w + 16, r.h + 18};
@@ -280,6 +281,7 @@ static void layout_taskbar(void) {
     static const icon_t *pin_icons[] = {&ICON_FOLDER, &ICON_STORE, &ICON_TERMINAL};
     for (int i = 0; i < 3; i++) tb_items[n_tb++] = (tb_item_t){TB_PIN, pins[i], NULL, pin_icons[i], {0}};
     for (cw_window *w = windows; w && n_tb < 24; w = w->next) {
+        if (w->hidden || w->popup) continue;
         /* a pinned built-in shows its window on the pin itself */
         int pinned = 0;
         for (int i = 1; i < 4; i++)
@@ -304,11 +306,20 @@ static void pill(surface_t *s, rect_t r) {
     stroke_round(s, r.x, r.y, r.w, r.h, 14, TH->panel_line);
 }
 
+static int shown(const cw_window *w) { return !w->minimized && !w->hidden; }
+
 static cw_window *top_window(void) {
     cw_window *top = NULL;
     for (cw_window *w = windows; w; w = w->next)
-        if (!w->minimized) top = w;
+        if (shown(w) && !w->popup) top = w;
     return top;
+}
+/* topmost shown window under a screen point, popups included */
+static cw_window *window_at(int x, int y) {
+    cw_window *found = NULL;
+    for (cw_window *w = windows; w; w = w->next)
+        if (shown(w) && rect_has(frame_rect(w), x, y)) found = w;
+    return found;
 }
 
 static void draw_taskbar(surface_t *s) {
@@ -541,6 +552,11 @@ static rect_t btn_rect(cw_window *w, int which) { /* 0 close, 1 minimize */
 static void draw_window(surface_t *s, cw_window *w, int active) {
     rect_t f = frame_rect(w);
     if (rect_empty(rect_intersect(frame_with_shadow(w), s->clip))) return;
+    if (w->popup) {
+        draw_shadow(s, f.x, f.y, f.w, f.h, 6);
+        blit(s, &w->surf, 0, 0, w->w, w->h, f.x, f.y);
+        return;
+    }
     draw_shadow(s, f.x, f.y, f.w, f.h, 12);
     fill_round(s, f.x - 1, f.y - 1, f.w + 2, f.h + 2, 11, active ? (dark_mode ? 0x50FFFFFF : 0x60404858) : 0x40404858);
     if (active) glass_round(s, f.x, f.y, f.w, TITLE_H + 12, 10, TH->active_title);
@@ -613,7 +629,7 @@ static void compose(void) {
     draw_desktop_icons(&back);
     cw_window *active = top_window();
     for (cw_window *w = windows; w; w = w->next)
-        if (!w->minimized) draw_window(&back, w, w == active);
+        if (shown(w)) draw_window(&back, w, w == active);
     draw_toasts(&back);
     draw_start(&back);
     draw_widgets(&back);
@@ -656,14 +672,20 @@ cw_window *win_create(const char *title, int w, int h, cw_event_fn fn, void *use
     return win;
 }
 
+void win_show(cw_window *w, int show) {
+    if (w->hidden == !show) return;
+    w->hidden = !show;
+    invalidate_all();
+}
+
 void win_focus(cw_window *w) {
     cw_window **pp = &windows;
     while (*pp && *pp != w) pp = &(*pp)->next;
     if (!*pp) return;
     *pp = w->next;
-    w->next = NULL;
     pp = &windows;
-    while (*pp) pp = &(*pp)->next;
+    while (*pp && (w->popup || !(*pp)->popup)) pp = &(*pp)->next; /* normal windows go below popups */
+    w->next = *pp;
     *pp = w;
     w->minimized = 0;
     invalidate_rect(frame_with_shadow(w));
@@ -678,8 +700,13 @@ static int win_alive(cw_window *w) {
 
 int win_resize(cw_window *w, int nw, int nh) {
     if (!win_alive(w)) return -1;
-    nw = imax(120, imin(nw, SCREEN_W - 20));
-    nh = imax(60, imin(nh, SCREEN_H - TASKBAR_H - TITLE_H - 20));
+    if (w->popup) {
+        nw = imax(1, imin(nw, SCREEN_W));
+        nh = imax(1, imin(nh, SCREEN_H));
+    } else {
+        nw = imax(120, imin(nw, SCREEN_W - 20));
+        nh = imax(60, imin(nh, SCREEN_H - TASKBAR_H - TITLE_H - 20));
+    }
     if (nw == w->w && nh == w->h) return 0;
     u32 *px = kmalloc((size_t)nw * nh * 4);
     if (!px) return -1;
@@ -692,10 +719,26 @@ int win_resize(cw_window *w, int nw, int nh) {
     w->surf = ns;
     w->w = nw;
     w->h = nh;
-    if (w->y + TITLE_H + nh > SCREEN_H - TASKBAR_H) w->y = imax(0, SCREEN_H - TASKBAR_H - TITLE_H - nh);
-    if (w->x + nw > SCREEN_W) w->x = imax(0, SCREEN_W - nw);
+    if (!w->popup) {
+        if (w->y + TITLE_H + nh > SCREEN_H - TASKBAR_H) w->y = imax(0, SCREEN_H - TASKBAR_H - TITLE_H - nh);
+        if (w->x + nw > SCREEN_W) w->x = imax(0, SCREEN_W - nw);
+    }
     invalidate_rect(frame_with_shadow(w));
     return 0;
+}
+void win_make_popup(cw_window *w) {
+    if (!win_alive(w) || w->popup) return;
+    invalidate_rect(frame_with_shadow(w));
+    w->popup = 1;
+    win_focus(w); /* moves it above the normal windows */
+    invalidate_rect(taskbar_rect());
+}
+void win_place(cw_window *w, int x, int y) {
+    if (!win_alive(w)) return;
+    invalidate_rect(frame_with_shadow(w));
+    w->x = x;
+    w->y = y - tbar(w);
+    invalidate_rect(frame_with_shadow(w));
 }
 cw_window *win_top(void) { return top_window(); }
 void mouse_pos(int *x, int *y) { *x = mx; *y = my; }
@@ -724,7 +767,7 @@ void win_close(cw_window *w) {
 }
 
 void win_invalidate(cw_window *w) {
-    if (!w->minimized) invalidate_rect((rect_t){w->x, w->y + TITLE_H, w->w, w->h});
+    if (shown(w)) invalidate_rect((rect_t){w->x, w->y + tbar(w), w->w, w->h});
 }
 
 static void send(cw_window *w, int type, int x, int y, int key, int button) {
@@ -769,9 +812,8 @@ static int hit_hover(void) {
         if (rect_has(widgets_btn_rect(), mx, my)) return 2900;
         return -1;
     }
-    cw_window *found = NULL; /* topmost window under the cursor */
-    for (cw_window *x = windows; x; x = x->next)
-        if (!x->minimized && rect_has(frame_rect(x), mx, my)) found = x;
+    cw_window *found = window_at(mx, my); /* topmost window under the cursor */
+    if (found && found->popup) return -1;
     if (found) {
         for (int b = 0; b < 2; b++)
             if (rect_has(btn_rect(found, b), mx, my)) return WIN_BTN_KEY(found, b);
@@ -790,7 +832,7 @@ static void hover_update(void) {
     if (start_open) invalidate_rect(start_rect());
     if (power_open) invalidate_rect(power_menu_rect());
     for (cw_window *w = windows; w; w = w->next)
-        if (!w->minimized) invalidate_rect((rect_t){w->x + w->w - 100, w->y, 100, TITLE_H});
+        if (shown(w)) invalidate_rect((rect_t){w->x + w->w - 100, w->y, 100, TITLE_H});
     for (int i = 0; i < n_launchers; i++) invalidate_rect(desktop_icon_rect(i));
 }
 
@@ -871,12 +913,10 @@ static void mouse_down(int button) {
         return;
     }
     /* windows, top first */
-    cw_window *hit = NULL;
-    for (cw_window *w = windows; w; w = w->next)
-        if (!w->minimized && rect_has(frame_rect(w), mx, my)) hit = w;
+    cw_window *hit = window_at(mx, my);
     if (hit) {
-        if (hit != top_window()) win_focus(hit);
-        if (my < hit->y + TITLE_H) {
+        if (!hit->popup && hit != top_window()) win_focus(hit);
+        if (!hit->popup && my < hit->y + TITLE_H) {
             if (rect_has(btn_rect(hit, 0), mx, my)) { win_close(hit); return; }
             if (rect_has(btn_rect(hit, 1), mx, my)) { hit->minimized = 1; invalidate_all(); return; }
             drag_win = hit;
@@ -885,7 +925,7 @@ static void mouse_down(int button) {
             return;
         }
         capture_win = hit;
-        send(hit, CW_MOUSE_DOWN, mx - hit->x, my - hit->y - TITLE_H, 0, button);
+        send(hit, CW_MOUSE_DOWN, mx - hit->x, my - hit->y - tbar(hit), 0, button);
         return;
     }
     /* desktop icons */
@@ -914,7 +954,7 @@ static void mouse_up(int button) {
     if (capture_win) {
         cw_window *w = capture_win;
         capture_win = NULL;
-        send(w, CW_MOUSE_UP, mx - w->x, my - w->y - TITLE_H, 0, button);
+        send(w, CW_MOUSE_UP, mx - w->x, my - w->y - tbar(w), 0, button);
     }
 }
 
@@ -940,11 +980,11 @@ static void handle_mouse(const input_event_t *ev) {
         invalidate_rect(old);
         invalidate_rect(frame_with_shadow(drag_win));
     } else if (capture_win && (ox != mx || oy != my)) {
-        send(capture_win, CW_MOUSE_MOVE, mx - capture_win->x, my - capture_win->y - TITLE_H, 0, mbuttons & 1 ? 1 : 2);
+        send(capture_win, CW_MOUSE_MOVE, mx - capture_win->x, my - capture_win->y - tbar(capture_win), 0, mbuttons & 1 ? 1 : 2);
     } else if (!mbuttons && (ox != mx || oy != my)) {
-        cw_window *t = top_window();
-        if (t && t->hover && !t->minimized && rect_has((rect_t){t->x, t->y + TITLE_H, t->w, t->h}, mx, my))
-            send(t, CW_MOUSE_MOVE, mx - t->x, my - t->y - TITLE_H, 0, 0);
+        cw_window *t = window_at(mx, my);
+        if (t && t->hover && (t->popup || t == top_window()) && rect_has((rect_t){t->x, t->y + tbar(t), t->w, t->h}, mx, my))
+            send(t, CW_MOUSE_MOVE, mx - t->x, my - t->y - tbar(t), 0, 0);
     }
     int pressed = ev->buttons & ~mbuttons, released = mbuttons & ~ev->buttons;
     mbuttons = ev->buttons;

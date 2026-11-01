@@ -10,6 +10,7 @@ SECTIONS
         *(.multiboot)
         *(.text .text.*)
     }
+    _text_end = .;
     .rodata : ALIGN(4K) { *(.rodata .rodata.*) }
     .data : ALIGN(4K) { *(.data .data.*) }
     _load_end = .;

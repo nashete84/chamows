@@ -54,7 +54,7 @@ static WINAPI void *g_CreateWindowExW(u32 ex, const u16 *cls, const u16 *title, 
         win->hidden = 1;
         win->style = style;
         win->exstyle = ex;
-        if (!k) { win->destroyed = 1; return win; }
+        if (!k) { klog("exe: clase de ventana desconocida: %s\n", cn); win->destroyed = 1; return win; }
         win->proc = k->proc;
         u64 cs[10] = {(u64)param};
         win->proc(win, 1, 0, (i64)cs);
@@ -82,19 +82,26 @@ static WINAPI void *g_CreateWindowExA(u32 ex, const char *cls, const char *title
 static WINAPI int g_ShowWindow(void *h, int cmd) {
     w32win_t *w = W(h);
     if (!w) return 0;
+    int was = w->cw && !w->cw->hidden;
     w->dirty = 1;
-    if (cmd != 0 && w->cw) { win_focus(w->cw); activate(w); }
-    return 0;
+    if (!w->cw) return was;
+    if (cmd == 0) { win_show(w->cw, 0); return was; }       /* SW_HIDE */
+    win_show(w->cw, 1);
+    if (cmd == 2 || cmd == 6 || cmd == 7) { w->cw->minimized = 1; return was; } /* minimize */
+    if (cmd != 4 && cmd != 8) { win_focus(w->cw); activate(w); } /* 4 and 8 show without activating */
+    return was;
 }
 static WINAPI int g_SetWindowPos(void *h, void *after, int x, int y, int cx, int cy, u32 fl) {
     w32win_t *w = W(h);
     if (!w || !w->cw) return 1;
     if (!(fl & 1) && cx > 0 && cy > 0) { /* not SWP_NOSIZE: outer size, as AdjustWindowRect made it */
-        int ow = w->cw->w, oh = w->cw->h;
-        if (win_resize(w->cw, cx - 16, cy - 39) == 0 && (ow != w->cw->w || oh != w->cw->h) && w->proc)
+        int ow = w->cw->w, oh = w->cw->h, fw = w->cw->popup ? 0 : 16, fh = w->cw->popup ? 0 : 39;
+        if (win_resize(w->cw, cx - fw, cy - fh) == 0 && (ow != w->cw->w || oh != w->cw->h) && w->proc)
             w->proc(w, 0x5, 0, (i64)((u32)w->cw->h << 16 | (u32)w->cw->w)); /* WM_SIZE */
     }
-    if (fl & 0x40) g_ShowWindow(h, 5); /* SWP_SHOWWINDOW */
+    if (!(fl & 2) && w->cw->popup) win_place(w->cw, x, y); /* not SWP_NOMOVE; normal windows keep their place */
+    if (fl & 0x40) g_ShowWindow(h, (fl & 0x10) ? 8 : 5); /* SWP_SHOWWINDOW (SWP_NOACTIVATE: don't focus) */
+    if (fl & 0x80) g_ShowWindow(h, 0);                     /* SWP_HIDEWINDOW */
     return 1;
 }
 static WINAPI int g_MoveWindow(void *h, int x, int y, int cx, int cy, int repaint) { return g_SetWindowPos(h, NULL, x, y, cx, cy, 0); }
@@ -105,7 +112,7 @@ static WINAPI i64 g_GetWindowLongPtrW(void *h, int i) {
     switch (i) {
     case -4: return (i64)w->proc;
     case -6: return (i64)cur->image;
-    case -16: return (i64)(w->style | (w->cw ? 0x10000000u : 0));
+    case -16: return (i64)((w->style & ~0x10000000u) | (w->cw && !w->cw->hidden ? 0x10000000u : 0));
     case -20: return w->exstyle;
     case -21: return w->userdata;
     }
@@ -160,7 +167,7 @@ static WINAPI u64 g_RemovePropW(void *h, const u16 *name) {
 /* coordinates: a client area starts below the Chamows title bar */
 static void client_origin(w32win_t *w, int *x, int *y) {
     *x = w && w->cw ? w->cw->x : 0;
-    *y = w && w->cw ? w->cw->y + TITLE_H : 0;
+    *y = w && w->cw ? w->cw->y + (w->cw->popup ? 0 : TITLE_H) : 0;
 }
 static WINAPI int g_GetWindowRect(void *h, RECT *r) {
     w32win_t *w = W(h);
@@ -168,7 +175,8 @@ static WINAPI int g_GetWindowRect(void *h, RECT *r) {
     if (!w || !w->cw) { *r = (RECT){0, 0, 0, 0}; return w != NULL; }
     int x, y;
     client_origin(w, &x, &y);
-    *r = (RECT){x - 8, y - 31, x + w->cw->w + 8, y + w->cw->h + 8};
+    if (w->cw->popup) *r = (RECT){x, y, x + w->cw->w, y + w->cw->h};
+    else *r = (RECT){x - 8, y - 31, x + w->cw->w + 8, y + w->cw->h + 8};
     return 1;
 }
 static WINAPI int g_ClientToScreen(void *h, i32 *pt) { int x, y; client_origin(W(h), &x, &y); pt[0] += x; pt[1] += y; return 1; }
@@ -184,7 +192,7 @@ static WINAPI void *g_SetFocus(void *h) {
 static WINAPI int g_SetForegroundWindow(void *h) { g_SetFocus(h); return 1; }
 static WINAPI void *g_GetDesktopWindow(void) { return HDESK; }
 static WINAPI int g_IsIconic(void *h) { w32win_t *w = W(h); return w && w->cw && w->cw->minimized; }
-static WINAPI int g_IsWindowVisible(void *h) { w32win_t *w = W(h); return w && w->cw && !w->cw->minimized; }
+static WINAPI int g_IsWindowVisible(void *h) { w32win_t *w = W(h); return w && w->cw && !w->cw->hidden; }
 static WINAPI int g_SetWindowTextW(void *h, const u16 *t) { char a[80]; w2a(t, a, sizeof a); return u_SetWindowTextA(h, a); }
 static WINAPI int g_GetWindowTextW(void *h, u16 *out, int n) {
     w32win_t *w = W(h);
