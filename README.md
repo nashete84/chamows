@@ -36,6 +36,10 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
 - **Qt 6 (paso 5 hacia Telegram)**: las DLL oficiales de Qt 6.12 (MSVC) funcionan. `rcc.exe` compila
   archivos .qrc y **Qt Designer abre y se usa**: menús desplegables, diálogos, ratón y teclado.
   Las fuentes TrueType se ponen en `WINDOWS\FONTS` del pendrive (por ejemplo DejaVu Sans).
+  Los programas Qt usan el aspecto **Windows 11** (botones redondeados, acento azul, menús translúcidos);
+  Chamows pone su propia fuente de iconos (`CHAMOWSI.TTF`) en `WINDOWS\FONTS` la primera vez.
+- **Telegram Desktop (en camino)**: el `Telegram.exe` oficial arranca, escribe su registro y llega a
+  cargar las fuentes; falta dibujar texto con GDI/DirectWrite.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.

@@ -13,6 +13,7 @@ typedef struct {
 static wfontinfo_t *fonts;
 static int nfonts = -1;
 #define FONT_DIR "WINDOWS/FONTS"
+#include "iconfont.h"
 
 static u16 be16(const u8 *p) { return (u16)(p[0] << 8 | p[1]); }
 static u32 be32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
@@ -78,6 +79,12 @@ static void fonts_scan(void) {
     if (!fonts) fonts = kzalloc(64 * sizeof *fonts);
     fat_entry_t *list = kmalloc(128 * sizeof *list);
     if (!fonts || !list || !fat_mounted) { kfree(list); return; }
+    fat_entry_t e;
+    if (fat_stat(FONT_DIR "/CHAMOWSI.TTF", &e) != 0) { /* Chamows's icon font: put it there the first time */
+        fat_mkdir("WINDOWS");
+        fat_mkdir(FONT_DIR);
+        fat_write(FONT_DIR "/CHAMOWSI.TTF", icon_font_ttf, sizeof icon_font_ttf);
+    }
     int n = fat_list(FONT_DIR, list, 128);
     for (int i = 0; i < n; i++) {
         if (list[i].is_dir) continue;

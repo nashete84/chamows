@@ -132,6 +132,42 @@ static WINAPI u16 *y__get_wide_winmain_command_line(void) {
     return c;
 }
 
+/* Layered windows (translucent menus with rounded corners): the program hands over
+ * finished pixels with alpha instead of painting on WM_PAINT. Popups keep the alpha and
+ * the compositor blends them; a normal window just gets the pixels. */
+static WINAPI int y_UpdateLayeredWindow(void *h, dc_t *dst, const i32 *pt, const i32 *size, dc_t *src,
+                                        const i32 *spt, u32 key, const u8 *blend, u32 fl) {
+    w32win_t *w = W(h);
+    if (!w || !w->cw) return 0;
+    cw_window *cw = w->cw;
+    if (size && size[0] > 0 && size[1] > 0 && (size[0] != cw->w || size[1] != cw->h)) {
+        if (cw->popup) win_resize(cw, size[0], size[1]);
+        else win_resize(cw, size[0] - 16, size[1] - 39);
+    }
+    if (pt && cw->popup) win_place(cw, pt[0], pt[1]);
+    surface_t *s = src ? dc_surf(src) : NULL;
+    if (s) {
+        int sx = spt ? spt[0] : 0, sy = spt ? spt[1] : 0;
+        for (int y = 0; y < cw->h; y++) {
+            if (sy + y < 0 || sy + y >= s->h) continue;
+            for (int x = 0; x < cw->w; x++) {
+                if (sx + x < 0 || sx + x >= s->w) continue;
+                u32 p = s->px[(sy + y) * s->stride + sx + x];
+                cw->surf.px[y * cw->surf.stride + x] = cw->popup ? p : p | 0xFF000000;
+            }
+        }
+        cw->alpha = cw->popup;
+    }
+    w->dirty = 0;
+    win_invalidate(cw);
+    if (cw->alpha) invalidate_rect((rect_t){cw->x, cw->y, cw->w, cw->h});
+    return 1;
+}
+static WINAPI int y_UpdateLayeredWindowIndirect(void *h, const u8 *info) {
+    return y_UpdateLayeredWindow(h, *(dc_t **)(info + 8), *(const i32 **)(info + 16), *(const i32 **)(info + 24),
+                                 *(dc_t **)(info + 32), *(const i32 **)(info + 40), *(const u32 *)(info + 48),
+                                 *(const u8 **)(info + 56), *(const u32 *)(info + 64));
+}
 static const struct { const char *name; void *fn; } exports_user[] = {
     {"GetSystemMetrics", y_GetSystemMetrics}, {"GetSystemMetricsForDpi", y_GetSystemMetricsForDpi},
     {"SystemParametersInfoW", y_SystemParametersInfoW}, {"SystemParametersInfoForDpi", y_SystemParametersInfoForDpi},
@@ -166,7 +202,7 @@ static const struct { const char *name; void *fn; } exports_user[] = {
     /* cursors and icons: Chamows draws its own pointer */
     {"GetCursor", y_fake_handle}, {"CreateCursor", y_fake_handle}, {"CreateIconIndirect", y_fake_handle},
     {"DestroyCursor", k_one}, {"DestroyIcon", k_one}, {"GetIconInfo", k_zero}, {"DrawIconEx", k_one}, {"LoadImageW", y_fake_handle},
-    {"UpdateLayeredWindow", k_one}, {"UpdateLayeredWindowIndirect", k_one},
+    {"UpdateLayeredWindow", y_UpdateLayeredWindow}, {"UpdateLayeredWindowIndirect", y_UpdateLayeredWindowIndirect},
     {"_get_narrow_winmain_command_line", y__get_narrow_winmain_command_line},
     {"_get_wide_winmain_command_line", y__get_wide_winmain_command_line},
 };

@@ -345,6 +345,12 @@ static void ex_fatal(ex_rec_t *rec, context_t *c) {
     u64 b = 0;
     w32mod_t *m = mod_at(rec->address, &b);
     klog("exe: %s se cerró: excepción %x en %s+0x%x\n", cur->name, rec->code, m ? m->name : "?", (u32)(rec->address - b));
+    if ((rec->code == 0xC06D007E || rec->code == 0xC06D007F) && rec->info[0]) { /* delay-load: which DLL and function */
+        const u8 *dli = (const u8 *)rec->info[0];
+        const char *dll = *(const char **)(dli + 24), *fn = *(const char **)(dli + 40);
+        if (*(const u32 *)(dli + 32)) klog("exe:   carga diferida: %s!%s no existe\n", dll ? dll : "?", fn ? fn : "?");
+        else klog("exe:   carga diferida: %s!#%u no existe\n", dll ? dll : "?", (u32)(u64)fn);
+    }
     char msg[120];
     ksnprintf(msg, sizeof msg, "Error %x en %s. El programa se cerró.", rec->code, m ? m->name : "Chamows");
     notify(cur->icon, cur->name, msg);

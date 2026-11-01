@@ -555,7 +555,20 @@ static WINAPI int k_HeapFree(u64 h, u32 f, void *p) { p_free(p); return 1; }
 static WINAPI void *k_HeapReAlloc(u64 h, u32 f, void *p, u64 n) { return p_realloc(p, n); }
 static WINAPI u32 k_GetCurrentProcessId(void) { return 4; }
 static WINAPI u64 k_GetCurrentProcess(void) { return (u64)-1; }
-static WINAPI void k_GetSystemTimeAsFileTime(u64 *ft) { *ft = 132000000000000000ULL + (u64)ticks_ms * 10000; }
+/* FILETIME (100 ns since 1601) from the real-time clock, read once and moved on by the tick counter */
+static u64 boot_ft;
+static WINAPI void k_GetSystemTimeAsFileTime(u64 *ft) {
+    if (!boot_ft) {
+        rtc_time_t t;
+        rtc_read(&t);
+        i64 y = t.year - (t.month <= 2), era = (y >= 0 ? y : y - 399) / 400;
+        i64 yoe = y - era * 400, mp = (t.month + 9) % 12, doy = (153 * mp + 2) / 5 + t.day - 1;
+        i64 days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468; /* since 1970-01-01 */
+        i64 secs = days * 86400 + t.hour * 3600 + t.min * 60 + t.sec;
+        boot_ft = (u64)(secs + 11644473600LL) * 10000000ULL - (u64)ticks_ms * 10000;
+    }
+    *ft = boot_ft + (u64)ticks_ms * 10000;
+}
 static WINAPI void k_GetLocalTime(u16 *st) {
     rtc_time_t t;
     rtc_read(&t);
@@ -1382,7 +1395,10 @@ static WINAPI int k_GlobalMemoryStatusEx(u8 *m) {
     for (int i = 0; i < 6; i++) *(u64 *)(m + 8 + i * 8) = i % 2 ? avail : total;
     return 1;
 }
+/* Windows 10 22H2. Reporting Windows 11 makes Qt use WinRT display APIs that Chamows lacks (uncaught exception) */
 static WINAPI int k_GetVersionExA(u8 *v) { *(u32 *)(v + 4) = 10; *(u32 *)(v + 8) = 0; *(u32 *)(v + 12) = 19045; *(u32 *)(v + 16) = 2; return 1; }
+static WINAPI u32 k_RtlGetVersion(u8 *v) { k_GetVersionExA(v); return 0; }
+static WINAPI void k_RtlGetNtVersionNumbers(u32 *ma, u32 *mi, u32 *b) { if (ma) *ma = 10; if (mi) *mi = 0; if (b) *b = 19045 | 0xF0000000u; }
 static WINAPI int k_IsProcessorFeaturePresent(u32 f) { return f == 6 || f == 10 || f == 3; }
 static WINAPI u32 k_GetModuleFileNameA(void *m, char *out, u32 n) { ksnprintf(out, n, "C:\\%s", cur->name); return (u32)strlen(out); }
 static WINAPI u32 k_GetModuleFileNameW(void *m, u16 *out, u32 n) {
@@ -1630,7 +1646,8 @@ static const struct { const char *name; void *fn; } exports2[] = {
     {"WakeConditionVariable", k_WakeConditionVariable}, {"WakeAllConditionVariable", k_WakeConditionVariable},
     {"SetThreadPriority", k_one}, {"GetThreadPriority", k_zero}, {"ResumeThread", k_zero}, {"SuspendThread", k_zero},
     {"SetThreadExecutionState", k_one}, {"SetProcessAffinityMask", k_one}, {"GetSystemInfo", k_GetSystemInfo},
-    {"GlobalMemoryStatusEx", k_GlobalMemoryStatusEx}, {"GetVersionExA", k_GetVersionExA}, {"GetVersionExW", k_GetVersionExA},
+    {"GlobalMemoryStatusEx", k_GlobalMemoryStatusEx}, {"GetVersionExA", k_GetVersionExA}, {"GetVersionExW", k_GetVersionExA}, {"RtlGetVersion", k_RtlGetVersion},
+    {"RtlGetNtVersionNumbers", k_RtlGetNtVersionNumbers},
     {"VerSetConditionMask", k_zero}, {"VerifyVersionInfoW", k_one}, {"IsProcessorFeaturePresent", k_IsProcessorFeaturePresent},
     {"GetModuleFileNameA", k_GetModuleFileNameA}, {"GetModuleFileNameW", k_GetModuleFileNameW},
     {"GetModuleHandleExW", k_GetModuleHandleExW}, {"LoadLibraryA", k_zero}, {"LoadLibraryW", k_zero},
@@ -1697,6 +1714,7 @@ static const char *pe_load(w32proc_t *p, const u8 *f, u32 size) {
     p->raw = m->raw;
     p->image = m->image;
     if (link_imports(p, m, 0, &err) < 0) return err;
+    link_delay_imports(m);
     tls_setup(p, m);
     const u8 *oh = opt_header(m->image);
     p->entry = (u64)m->image + RD32(oh + 16);
@@ -1839,6 +1857,7 @@ static void proc_free(w32proc_t *p) {
     p->raw = p->peb = p->image = NULL;
     p->wins = NULL;
     p->cleaned = 1;
+    for (wfile_t *f = wf_open_list; f; f = f->next) wf_flush(f); /* what the program wrote reaches the disk, as on Windows */
     klog("exe: %s terminó (código %d)\n", p->name, p->exit_code);
 }
 

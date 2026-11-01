@@ -553,6 +553,7 @@ static void draw_window(surface_t *s, cw_window *w, int active) {
     rect_t f = frame_rect(w);
     if (rect_empty(rect_intersect(frame_with_shadow(w), s->clip))) return;
     if (w->popup) {
+        if (w->alpha) { blit_argb(s, w->surf.px, w->w, w->h, f.x, f.y); return; } /* draws its own shadow */
         draw_shadow(s, f.x, f.y, f.w, f.h, 6);
         blit(s, &w->surf, 0, 0, w->w, w->h, f.x, f.y);
         return;

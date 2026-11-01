@@ -233,3 +233,20 @@ pequeños desde internet, y una app propia de mensajes.
 - **Trazador de llamadas:** `W32_TRACE 1` en win32.c registra cada llamada a Windows de un .exe/DLL ("Nombre(a,b) desde dirección"). Apagado por defecto. Sirvió para encontrar el fallo del bucle.
 - **No hay todavía:** nombres largos nuevos en FAT (Designer no puede crear `.designer`; avisa y sigue), dibujado con GDI de texto, Direct3D, portapapeles y arrastrar y soltar.
 - **Probado en QEMU:** `rcc.exe --help` y `rcc.exe test.qrc -o out.cpp` (el contenido descomprimido es igual al original). Designer: abre con texto DejaVu, el diálogo New Form responde a clics, crea un formulario, el menú File se abre en su sitio con resaltado al pasar el ratón, File > New abre el diálogo y escribir "push" en el filtro deja solo Push Button. `make test` (64 y 32 bits), EX.EXE, SD.EXE y ScummVM siguen igual.
+
+## 27. Aspecto Windows 11 en Qt y primeros pasos de Telegram (paso 6)
+- **Estilo:** `QT_STYLE_OVERRIDE=windows11` por defecto. Rechazado: decir que somos Windows 11 (build 22631); Qt elige ese estilo solo, pero también usa APIs WinRT de pantalla que Chamows no tiene y el programa se cierra. Chamows sigue diciendo Windows 10 22H2.
+- **Iconos del estilo:** Qt dibuja flechas, marcas y botones con caracteres de la fuente "Segoe Fluent Icons", que no es libre. Chamows trae su propia fuente (`tools/make-iconfont.py` la genera con trazos simples; `iconfont.h` la lleva dentro del núcleo) con los mismos códigos y ese nombre de familia, y la escribe en `WINDOWS\FONTS\CHAMOWSI.TTF` si falta.
+- **Color de acento:** Qt lo pide a WinRT (`UISettings.GetColorValue`). Hay un WinRT mínimo: HSTRING con el formato de Windows (C++/WinRT construye las cadenas él mismo), `RoGetActivationFactory` solo para `Windows.UI.ViewManagement.UISettings`, con el azul de Windows 11 (#0078D4) y tema claro. El resto de clases dan REGDB_E_CLASSNOTREG.
+- **Menús translúcidos:** UpdateLayeredWindow(Indirect) copia los píxeles con alfa a la ventana emergente y el compositor los mezcla (esquinas redondeadas y sombra propias de Qt). Las emergentes avisan WM_MOVE al moverse, porque Qt toma de ahí su posición.
+- **Telegram 7.3.3 (exe estático de 250 MB):**
+  - Las importaciones de carga diferida de DLL de Windows se enlazan al cargar, con stubs para lo que falta. Si no, el ayudante del programa pedía GetProcAddress y una función ausente lo mataba (C06D007F).
+  - FAT crea nombres largos de hasta 255 letras (antes 63).
+  - Tuberías con nombre: se puede escuchar (QLocalServer) aunque nadie conecte; Telegram las usa para saber si ya hay otro abierto.
+  - Esperas del grupo de hilos: WaitFor...Callbacks ya no espera a una espera que nunca se cumple.
+  - Al terminar un programa se guardan sus archivos abiertos, como en Windows (así queda el registro de Telegram).
+  - La fecha (GetSystemTimeAsFileTime) sale del reloj real; antes era fija en 2019.
+  - Números aleatorios para OpenSSL: CryptGenRandom, BCryptGenRandom.
+  - Unas 35 funciones de kernel32 más (afinidad, energía, rutas, sesiones...).
+- **Dónde está Telegram:** arranca, decide que es la única copia, crea `tdata` y su registro, y se cae al crear las fuentes. Su Qt no trae FreeType en Windows; usa DirectWrite o GDI. Falta un dibujante de fuentes TrueType en Chamows (CreateFontIndirect, GetGlyphOutline, GetFontData, ExtTextOut).
+- **Probado en QEMU:** Designer con estilo Windows 11 (botones redondeados, casillas azules con marca, flechas, menú File translúcido en su sitio con resaltado). Telegram llega a "Cannot initialize common font database data" y se cierra (c0000005). `make test` 64 y 32 bits, EX, SD, rcc y ScummVM siguen igual.

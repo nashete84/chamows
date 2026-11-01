@@ -32,6 +32,7 @@ struct cw_window {
     int closing;
     int hover;                /* also send CW_MOUSE_MOVE (button 0) without a button held */
     int popup;                /* no frame, no taskbar button, stays above normal windows (menus, tooltips) */
+    int alpha;                /* client pixels carry alpha (layered windows): blended over what is behind */
     struct app_instance *app; /* NULL for built-in apps */
     struct cw_window *next;   /* z-order: list head is the bottom */
 };

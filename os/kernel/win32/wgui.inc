@@ -99,7 +99,10 @@ static WINAPI int g_SetWindowPos(void *h, void *after, int x, int y, int cx, int
         if (win_resize(w->cw, cx - fw, cy - fh) == 0 && (ow != w->cw->w || oh != w->cw->h) && w->proc)
             w->proc(w, 0x5, 0, (i64)((u32)w->cw->h << 16 | (u32)w->cw->w)); /* WM_SIZE */
     }
-    if (!(fl & 2) && w->cw->popup) win_place(w->cw, x, y); /* not SWP_NOMOVE; normal windows keep their place */
+    if (!(fl & 2) && w->cw->popup && (x != w->cw->x || y != w->cw->y)) { /* not SWP_NOMOVE; normal windows keep their place */
+        win_place(w->cw, x, y);
+        if (w->proc) w->proc(w, 0x3, 0, (i64)((u32)(u16)y << 16 | (u16)x)); /* WM_MOVE: Qt learns its window's new place from it */
+    }
     if (fl & 0x40) g_ShowWindow(h, (fl & 0x10) ? 8 : 5); /* SWP_SHOWWINDOW (SWP_NOACTIVATE: don't focus) */
     if (fl & 0x80) g_ShowWindow(h, 0);                     /* SWP_HIDEWINDOW */
     return 1;

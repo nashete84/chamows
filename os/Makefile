@@ -65,7 +65,7 @@ $(BUILD)/k/%.o: kernel/%.c kernel/*.h kernel/usb/*.h kernel/net/*.h kernel/arch/
 
 # the Win32 layer runs Windows code, which uses SSE
 $(BUILD)/k/win32/%.o: KFLAGS += -msse -msse2 -m80387 -mfpmath=sse
-$(BUILD)/k/win32/win32.o: kernel/win32/wfiles.inc kernel/win32/wgui.inc kernel/win32/wsock.inc kernel/win32/wdll.inc kernel/win32/wsync.inc kernel/win32/wseh.inc kernel/win32/wcrt.inc kernel/win32/wmisc.inc kernel/win32/wuser.inc kernel/win32/wfont.inc
+$(BUILD)/k/win32/win32.o: kernel/win32/wfiles.inc kernel/win32/wgui.inc kernel/win32/wsock.inc kernel/win32/wdll.inc kernel/win32/wsync.inc kernel/win32/wseh.inc kernel/win32/wcrt.inc kernel/win32/wmisc.inc kernel/win32/wuser.inc kernel/win32/wfont.inc kernel/win32/iconfont.h
 
 $(BUILD)/winapps/%.exe: winapps/%/main.c
 	@mkdir -p $(dir $@)

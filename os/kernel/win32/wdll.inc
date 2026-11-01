@@ -206,6 +206,36 @@ static int link_imports(w32proc_t *p, w32mod_t *m, int depth, const char **err) 
     return 0;
 }
 
+/* Delay-loaded imports of Windows's own DLLs are linked now, like normal ones. Otherwise
+ * the program's delay-load helper asks GetProcAddress later, and a function Chamows lacks
+ * kills it (exception C06D007F) instead of getting a stub that returns 0. */
+static void link_delay_imports(w32mod_t *m) {
+    u8 *img = m->image;
+    u32 d = dir_rva(img, 13, NULL);
+    int unknown = 0;
+    if (!d) return;
+    for (; d + 32 <= m->size && RD32(img + d + 4); d += 32) {
+        char base[64];
+        dll_base((const char *)img + RD32(img + d + 4), base, sizeof base);
+        if (!is_sys_dll(base)) continue; /* the program's own DLLs keep loading on first use */
+        u32 hmod = RD32(img + d + 8), iat = RD32(img + d + 12), names = RD32(img + d + 16);
+        if (!iat || !names) continue;
+        if (hmod) *(u64 *)(img + hmod) = (u64)&sys_mod;
+        for (u32 k = 0;; k++) {
+            u64 t = RD64(img + names + 8 * k);
+            if (!t) break;
+            const char *name = t >> 63 ? ord_name(base, (u32)(t & 0xFFFF)) : (const char *)img + (u32)t + 2;
+            void *fn = name ? builtin_lookup(name) : NULL;
+            char tmp[96];
+            if (!name) { ksnprintf(tmp, sizeof tmp, "%s#%u", base, (u32)(t & 0xFFFF)); name = tmp; }
+            if (!fn) { unknown++; fn = unknown_thunk(name); }
+            else fn = trace_thunk(name, fn);
+            *(u64 *)(img + iat + 8 * k) = (u64)fn;
+        }
+    }
+    if (unknown) klog("exe: %s usa %d funciones de Windows de carga diferida sin implementar\n", m->name, unknown);
+}
+
 /* ---- thread-local storage: one block per module that has a .tls section ---- */
 static void tls_setup(w32proc_t *p, w32mod_t *m) {
     u32 t = dir_rva(m->image, 9, NULL);
@@ -280,6 +310,7 @@ static w32mod_t *mod_load(w32proc_t *p, const char *name, int depth, int datafil
     p->mods = m;
     if (!datafile) {
         if (link_imports(p, m, depth, err) < 0) { klog("exe: %s: %s\n", m->name, *err); mod_unload(p, m); return NULL; }
+        link_delay_imports(m);
         tls_setup(p, m);
         if (RD32(oh + 16)) m->entry = (u64)m->image + RD32(oh + 16);
         /* initialisation order: dependencies first */
@@ -496,9 +527,10 @@ static WINAPI int d_LoadStringA(u64 h, u32 id, char *out, int n) {
     return len;
 }
 
+static WINAPI void d_FreeLibraryAndExitThread(u64 h, u32 code) { d_FreeLibrary(h); k_ExitThread(code); }
 static const struct { const char *name; void *fn; } exports_dll[] = {
     {"LoadLibraryA", d_LoadLibraryA}, {"LoadLibraryW", d_LoadLibraryW}, {"LoadLibraryExA", d_LoadLibraryExA},
-    {"LoadLibraryExW", d_LoadLibraryExW}, {"FreeLibrary", d_FreeLibrary}, {"GetProcAddress", d_GetProcAddress},
+    {"LoadLibraryExW", d_LoadLibraryExW}, {"FreeLibrary", d_FreeLibrary}, {"FreeLibraryAndExitThread", d_FreeLibraryAndExitThread}, {"GetProcAddress", d_GetProcAddress},
     {"GetModuleHandleA", d_GetModuleHandleA}, {"GetModuleHandleW", d_GetModuleHandleW},
     {"GetModuleHandleExA", d_GetModuleHandleExA}, {"GetModuleHandleExW", d_GetModuleHandleExW},
     {"GetModuleFileNameA", d_GetModuleFileNameA}, {"GetModuleFileNameW", d_GetModuleFileNameW},

@@ -181,7 +181,7 @@ static u32 ent_cluster(const dirent_t *e) { return (u32)e->clus_hi << 16 | e->cl
 
 /* Long names: LFN entries come before the short entry, last part first.
  * Each holds 13 UTF-16 characters; we keep the ASCII/Latin-1 ones. */
-typedef struct { char s[64]; int ok; u8 sum; } lfn_t;
+typedef struct { char s[256]; int ok; u8 sum; } lfn_t;
 static u8 lfn_sum(const char *n83) { u8 s = 0; for (int i = 0; i < 11; i++) s = (u8)(((s & 1) << 7) + (s >> 1) + (u8)n83[i]); return s; }
 static void lfn_add(lfn_t *l, const u8 *e) {
     static const u8 off[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
@@ -192,7 +192,7 @@ static void lfn_add(lfn_t *l, const u8 *e) {
         int pos = (ord - 1) * 13 + k;
         u16 ch = (u16)(e[off[k]] | e[off[k] + 1] << 8);
         if (ch == 0 || ch == 0xFFFF) break;
-        if (pos < 63) l->s[pos] = ch < 256 ? (char)ch : '_';
+        if (pos < 255) l->s[pos] = ch < 256 ? (char)ch : '_';
     }
 }
 static int same_name(const char *a, const char *b, int blen) {
@@ -257,7 +257,7 @@ static int walk_name(const char *path, u32 *parent, const char **last, int *last
 }
 /* Same, for creating. A name that is not 8.3 gets a short alias (LONGNA~1.TXT)
  * and its long name is kept in pending_long for dir_add to write as LFN entries. */
-static char pending_long[64];
+static char pending_long[256];
 static int walk(const char *path, u32 *parent, char last83[11]) {
     const char *last;
     int len;
@@ -266,7 +266,7 @@ static int walk(const char *path, u32 *parent, char last83[11]) {
     dirent_t e;
     if (dir_find_name(*parent, last, len, &e, NULL, NULL) == 0) { memcpy(last83, e.name, 11); return 0; }
     if (to83(last, len, last83) == 0) return 0;
-    if (len > 63) return -1;
+    if (len > 255) return -1;
     for (int i = 0; i < len; i++) if (last[i] == '/' || last[i] == '\\' || last[i] == ':' || last[i] == '*' || last[i] == '?') return -1;
     int dot = -1;
     for (int i = 0; i < len; i++) if (last[i] == '.') dot = i;
