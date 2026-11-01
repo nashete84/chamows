@@ -56,6 +56,7 @@ typedef struct w32thread {
     int done;
     u64 start, param;
     u64 tls_slots[64];
+    void *ex_chain;      /* exceptions: see wseh.inc */
     u32 lasterr, preempts; /* GetLastError of this thread; times its turn was taken */
     int errno_v;
     struct w32thread *next;
@@ -1303,7 +1304,7 @@ static WINAPI u32 k_GetFileType(u64 h) { return h >= 0x10 && h <= 0x12 ? 2 : 1; 
 static WINAPI void *k_GlobalAlloc(u32 f, u64 n) { return p_alloc(n ? n : 1, 1); }
 static WINAPI void *k_GlobalLock(void *p) { return p; }
 static WINAPI void *k_GlobalFree(void *p) { p_free(p); return NULL; }
-static WINAPI void k_RaiseException(u32 code, u32 f, u32 n, const u64 *args) {
+static WINAPI void k_RaiseException_old(u32 code, u32 f, u32 n, const u64 *args) {
     klog("exe: excepción de Windows %x sin manejar; el programa se cierra\n", code);
     proc_exit(255);
 }
@@ -1524,7 +1525,7 @@ static const struct { const char *name; void *fn; } exports2[] = {
     {"SetEnvironmentVariableA", k_one}, {"SetErrorMode", k_zero}, {"lstrlenW", k_lstrlenW}, {"MulDiv", k_MulDiv},
     {"OutputDebugStringW", k_OutputDebugStringW}, {"WriteConsoleW", k_WriteConsoleW}, {"SetConsoleTitleW", k_one},
     {"GetFileType", k_GetFileType}, {"GlobalAlloc", k_GlobalAlloc}, {"GlobalLock", k_GlobalLock}, {"GlobalUnlock", k_one},
-    {"GlobalFree", k_GlobalFree}, {"LocalFree", k_zero}, {"RaiseException", k_RaiseException},
+    {"GlobalFree", k_GlobalFree}, {"LocalFree", k_zero}, {"RaiseException", k_RaiseException_old},
     {"_strdup", c__strdup}, {"_stricmp", c__stricmp}, {"_strnicmp", c__strnicmp}, {"_strlwr", c__strlwr},
     {"_strupr", c__strupr}, {"_strrev", c__strrev}, {"memchr", c_memchr}, {"strstr", c_strstr}, {"strspn", c_strspn},
     {"strcspn", c_strcspn}, {"strpbrk", c_strpbrk}, {"strncat", c_strncat}, {"strncpy_s", c_strncpy_s}, {"strtok", c_strtok},
@@ -1557,11 +1558,12 @@ static const struct { const char *name; void *fn; } exports2[] = {
 
 /* ---------- loader ---------- */
 #include "wdll.inc"
+#include "wseh.inc"
 
 /* A function of the Win32 layer, by name; NULL if Chamows does not have it. */
 static void *builtin_lookup(const char *name) {
 #define LOOK(t) for (u32 j = 0; j < sizeof t / sizeof t[0]; j++) if (strcmp(t[j].name, name) == 0) return t[j].fn;
-    LOOK(exports_sync) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
+    LOOK(exports_seh) LOOK(exports_sync) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
 #undef LOOK
     return NULL;
 }
@@ -1760,6 +1762,7 @@ __attribute__((target("general-regs-only"))) static void preempt_tick(regs_t *r)
 /* Called by the desktop loop: timers, then each program that can run. */
 void win32_poll(void) {
     tick_hook = preempt_tick;
+    fault_hook = cpu_fault;
     for (w32proc_t **pp = &procs; *pp;) {
         w32proc_t *p = *pp;
         if (p->killed && !p->done) p->done = 1;
