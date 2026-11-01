@@ -97,6 +97,7 @@ int app_running(const char *id);
 /* ---- Windows programs (win32/win32.c) ---- */
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon);
 extern char pe_dir[160]; /* folder of the next .exe on the pendrive ("" = root); its current directory */
+extern int pe_cwd_root;     /* set by the terminal: the next .exe starts in the root folder */
 int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args);
 void win32_poll(void);
 

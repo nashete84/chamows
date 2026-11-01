@@ -177,7 +177,8 @@ static u64 create_file(const char *name, u32 access, u32 disp) {
     if (fix_path(name, fp, sizeof fp) != 0) { last_error = 3; return INVALID_H; }
     if (!strcmp(name, "CONOUT$") || !strcmp(name, "CON")) return 0x11;
     if (!strcmp(name, "CONIN$")) return 0x10;
-    if ((name[0] == '\\' && name[1] == '\\' && (name[2] == '.' || name[2] == '?')) || !c_strncmp(name, "//./", 4)) {
+    int drive_long = name[0] == '\\' && name[1] == '\\' && name[2] == '?' && name[3] == '\\' && name[4] && name[5] == ':'; /* \\?\C:\... */
+    if ((name[0] == '\\' && name[1] == '\\' && (name[2] == '.' || name[2] == '?') && !drive_long) || !c_strncmp(name, "//./", 4)) {
         last_error = 2; /* pipes and devices: there are none */
         return INVALID_H;
     }
@@ -635,6 +636,7 @@ static WINAPI u16 *c__wfullpath(u16 *out, const u16 *p, u64 n) {
 
 /* ---- text conversion: UTF-8 (code page 65001) or Latin-1 for the rest ---- */
 static WINAPI int f_MultiByteToWideChar(u32 cp, u32 fl, const char *src, int n, u16 *dst, int max) {
+    if (cp == 0 || cp == 1 || cp == 3) cp = 65001; /* the system code page is UTF-8 (GetACP) */
     if (!src) { last_error = 87; return 0; }
     if (n < 0) n = (int)strlen(src) + 1;
     int k = 0;
@@ -652,6 +654,7 @@ static WINAPI int f_MultiByteToWideChar(u32 cp, u32 fl, const char *src, int n, 
     return k;
 }
 static WINAPI int f_WideCharToMultiByte(u32 cp, u32 fl, const u16 *src, int n, char *dst, int max, const char *def, int *used) {
+    if (cp == 0 || cp == 1 || cp == 3) cp = 65001;
     if (!src) { last_error = 87; return 0; }
     if (n < 0) { n = 0; while (src[n]) n++; n++; }
     int k = 0;

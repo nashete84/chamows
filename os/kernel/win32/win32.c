@@ -187,14 +187,31 @@ static void to_utf8(const char *s, int len, char *out, int max) {
     out[o] = 0;
 }
 
-/* printf-style formatting with the Windows variadic convention */
+/* UTF-16 -> UTF-8 (for wide strings inside printf) */
+static int w_to_u8(const u16 *w, int wlen, char *out, int max) {
+    int o = 0;
+    for (int i = 0; (wlen < 0 ? w[i] != 0 : i < wlen) && o < max - 4; i++) {
+        u32 c = w[i];
+        if (c >= 0xD800 && c < 0xDC00 && w[i + 1] >= 0xDC00 && w[i + 1] < 0xE000) { c = 0x10000 + ((c - 0xD800) << 10) + (w[i + 1] - 0xDC00); i++; }
+        if (c < 0x80) out[o++] = (char)c;
+        else if (c < 0x800) { out[o++] = (char)(0xC0 | c >> 6); out[o++] = (char)(0x80 | (c & 63)); }
+        else if (c < 0x10000) { out[o++] = (char)(0xE0 | c >> 12); out[o++] = (char)(0x80 | (c >> 6 & 63)); out[o++] = (char)(0x80 | (c & 63)); }
+        else { out[o++] = (char)(0xF0 | c >> 18); out[o++] = (char)(0x80 | (c >> 12 & 63)); out[o++] = (char)(0x80 | (c >> 6 & 63)); out[o++] = (char)(0x80 | (c & 63)); }
+    }
+    out[o] = 0;
+    return o;
+}
+/* printf-style formatting with the Windows variadic convention. fmt_wide:
+ * the wide printf family, where %s and %c mean wide strings/characters. */
+static int fmt_wide;
 static int vfmt(char *out, int size, const char *f, __builtin_ms_va_list ap) {
     int n = 0;
+    char wtmp[1024];
 #define PUT(ch) do { if (n < size - 1) out[n] = (char)(ch); n++; } while (0)
     for (; *f; f++) {
         if (*f != '%') { PUT(*f); continue; }
         f++;
-        int left = 0, zero = 0, plus = 0, width = 0, prec = -1, lng = 0;
+        int left = 0, zero = 0, plus = 0, width = 0, prec = -1, lng = 0, shrt = 0;
         for (;; f++) {
             if (*f == '-') left = 1; else if (*f == '0') zero = 1; else if (*f == '+') plus = 1;
             else if (*f == ' ' || *f == '#') {} else break;
@@ -209,7 +226,11 @@ static int vfmt(char *out, int size, const char *f, __builtin_ms_va_list ap) {
         for (;; f++) {
             if (*f == 'l' || *f == 'z' || *f == 'j' || *f == 't') lng++;
             else if (*f == 'I' && f[1] == '6' && f[2] == '4') { lng = 2; f += 2; }
-            else if (*f == 'h') {} else break;
+            else if (*f == 'h') shrt = 1;
+            else if (*f == 'L' || *f == 'q') lng = 2;
+            else if (*f == 'I' && f[1] == '3' && f[2] == '2') f += 2;
+            else if (*f == 'I') lng = 2;
+            else break;
         }
         char tmp[64];
         int len = 0, neg = 0;
@@ -253,9 +274,20 @@ static int vfmt(char *out, int size, const char *f, __builtin_ms_va_list ap) {
             }
             break;
         }
-        case 'c': tmp[0] = (char)__builtin_va_arg(ap, int); len = 1; break;
-        case 's': {
-            str = __builtin_va_arg(ap, const char *);
+        case 'c': case 'C': {
+            int c = __builtin_va_arg(ap, int);
+            int wide = *f == 'C' ? !fmt_wide : shrt ? 0 : lng ? 1 : fmt_wide;
+            if (wide) { u16 w[2] = {(u16)c, 0}; len = w_to_u8(w, 1, tmp, sizeof tmp); }
+            else { tmp[0] = (char)c; len = 1; }
+            break;
+        }
+        case 's': case 'S': {
+            int wide = *f == 'S' ? !fmt_wide : shrt ? 0 : lng ? 1 : fmt_wide;
+            if (wide) {
+                const u16 *w = __builtin_va_arg(ap, const u16 *);
+                if (!w) str = "(null)";
+                else { w_to_u8(w, prec >= 0 ? -1 : -1, wtmp, sizeof wtmp); str = wtmp; }
+            } else str = __builtin_va_arg(ap, const char *);
             if (!str) str = "(null)";
             while (str[len] && (prec < 0 || len < prec)) len++;
             break;
@@ -1503,6 +1535,8 @@ __attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
 #include "wgui.inc"
 #include "wsock.inc"
 #include "wsync.inc"
+#include "wcrt.inc"
+#include "wmisc.inc"
 
 static const struct { const char *name; void *fn; } exports2[] = {
     {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
@@ -1563,7 +1597,7 @@ static const struct { const char *name; void *fn; } exports2[] = {
 /* A function of the Win32 layer, by name; NULL if Chamows does not have it. */
 static void *builtin_lookup(const char *name) {
 #define LOOK(t) for (u32 j = 0; j < sizeof t / sizeof t[0]; j++) if (strcmp(t[j].name, name) == 0) return t[j].fn;
-    LOOK(exports_seh) LOOK(exports_sync) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
+    LOOK(exports_seh) LOOK(exports_sync) LOOK(exports_crt) LOOK(exports_misc) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
 #undef LOOK
     return NULL;
 }
@@ -1650,13 +1684,15 @@ static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64
 
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) { return pe_run_args(data, size, name, icon, ""); }
 char pe_dir[160];
+int pe_cwd_root; /* started from the terminal: the current folder is the terminal's (the root) */
 int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args) {
     w32proc_t *p = kzalloc(sizeof *p);
     if (!p) return -1;
     strncpy0(p->name, name, sizeof p->name);
-    strncpy0(p->cwd, pe_dir, sizeof p->cwd);
+    strncpy0(p->cwd, pe_cwd_root ? "" : pe_dir, sizeof p->cwd);
     strncpy0(p->exedir, pe_dir, sizeof p->exedir);
     pe_dir[0] = 0;
+    pe_cwd_root = 0;
     /* ScummVM picks OpenGL by default, which Chamows lacks: ask for its software
      * renderer. With no sound card its music never ends and games wait for it
      * forever, so music is switched off too. */
@@ -1812,6 +1848,7 @@ void win32_poll(void) {
 
 #else /* 32-bit build: Windows programs need the 64-bit Chamows */
 char pe_dir[160];
+int pe_cwd_root; /* started from the terminal: the current folder is the terminal's (the root) */
 int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args) { return pe_run(data, size, name, icon); }
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) {
     notify(icon, "No se pudo abrir el programa", "Los .exe solo funcionan en Chamows de 64 bits.");

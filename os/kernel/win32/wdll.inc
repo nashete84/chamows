@@ -185,7 +185,8 @@ static int link_imports(w32proc_t *p, w32mod_t *m, int depth, const char **err) 
             if (!t) break;
             void *fn;
             const char *name = NULL;
-            if (t >> 63) fn = mod_export(p, dep, NULL, (u32)(t & 0xFFFF), 0, depth);
+            if (t >> 63 && dep == &sys_mod && (name = ord_name(base, (u32)(t & 0xFFFF)))) fn = builtin_lookup(name);
+            else if (t >> 63) fn = mod_export(p, dep, NULL, (u32)(t & 0xFFFF), 0, depth);
             else { name = (const char *)img + (u32)t + 2; fn = mod_export(p, dep, name, 0, RD16(img + (u32)t), depth); }
             if (!fn && dep != &sys_mod) {
                 if (name) klog("exe: %s no tiene %s\n", base, name);

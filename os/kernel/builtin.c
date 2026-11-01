@@ -363,6 +363,7 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
         while (*a == ' ') a++;
         strncpy0(pe_dir, path, sizeof pe_dir);
         pe_dir[name - path ? name - path - 1 : 0] = 0; /* the .exe's folder */
+        pe_cwd_root = 1;
         int rc = pe_run_args(data, size, name, &ICON_APP, a);
         kfree(data);
         t_print(t, rc == 0 ? "Programa abierto." : "No se pudo abrir el programa.");
