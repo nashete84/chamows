@@ -38,6 +38,7 @@ static struct { u16 limit; uptr base; } __attribute__((packed)) idtr;
 extern uptr isr_stub_table[48];
 
 static irq_handler_t irq_handlers[16];
+irq_handler_t tick_hook; /* win32.c: takes the CPU from a Windows thread whose turn is over */
 volatile u32 ticks_ms;
 static u32 ms_per_tick = 10;
 
@@ -63,6 +64,8 @@ void isr_dispatch(regs_t *r) {
     if (irq_handlers[irq]) irq_handlers[irq](r);
     if (irq >= 8) outb(0xA0, 0x20);
     outb(0x20, 0x20);
+    /* after the EOI: the hook may switch to another thread and come back later */
+    if (irq == 0 && tick_hook) tick_hook(r);
 }
 
 void irq_install(int irq, irq_handler_t h) {

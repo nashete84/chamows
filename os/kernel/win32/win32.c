@@ -56,6 +56,8 @@ typedef struct w32thread {
     int done;
     u64 start, param;
     u64 tls_slots[64];
+    u32 lasterr, preempts; /* GetLastError of this thread; times its turn was taken */
+    int errno_v;
     struct w32thread *next;
 } w32thread_t;
 
@@ -104,6 +106,8 @@ static w32thread_t *cur_th;
 static void thread_main(void);
 static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64 param, u32 stack_size);
 static u32 next_tid = 8;
+#define SLICE_MS 20
+static u32 slice_end;
 static uptr kernel_rsp;
 
 /* ---------- switching stacks ---------- */
@@ -1497,6 +1501,7 @@ __attribute__((naked, ms_abi)) static void c_longjmp(void *buf, int val) {
 #include "wfiles.inc"
 #include "wgui.inc"
 #include "wsock.inc"
+#include "wsync.inc"
 
 static const struct { const char *name; void *fn; } exports2[] = {
     {"CreateThread", k_CreateThread}, {"_beginthreadex", c__beginthreadex}, {"_endthreadex", k_ExitThread},
@@ -1556,7 +1561,7 @@ static const struct { const char *name; void *fn; } exports2[] = {
 /* A function of the Win32 layer, by name; NULL if Chamows does not have it. */
 static void *builtin_lookup(const char *name) {
 #define LOOK(t) for (u32 j = 0; j < sizeof t / sizeof t[0]; j++) if (strcmp(t[j].name, name) == 0) return t[j].fn;
-    LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
+    LOOK(exports_sync) LOOK(exports_dll) LOOK(exports_files) LOOK(exports_sock) LOOK(exports_gui) LOOK(exports) LOOK(exports2)
 #undef LOOK
     return NULL;
 }
@@ -1733,8 +1738,28 @@ static int ready(w32proc_t *p, w32thread_t *t) {
     return 1;
 }
 
+/* ---------- preemption ----------
+ * Every timer tick (10 ms) the CPU checks whether a Windows thread has used
+ * up its turn. If it is running the program's own code (not Chamows' code,
+ * which is never interrupted halfway), it is paused right there and the
+ * desktop and the other threads run. Its registers stay on its own stack. */
+extern char _load_start[], _load_end[];
+__attribute__((target("general-regs-only"))) static void preempt_tick(regs_t *r) {
+    if (!cur_th || !cur || cur->done) return;
+    u64 ip = REG_IP(r);
+    if (ip >= (u64)(uptr)_load_start && ip < (u64)(uptr)_load_end) return; /* inside Chamows */
+    if ((i32)(ticks_ms - slice_end) < 0) return;
+    u8 area[512 + 16];
+    u8 *fx = (u8 *)(((uptr)area + 15) & ~(uptr)15);
+    __asm__ volatile("fxsave64 (%0)" ::"r"(fx) : "memory"); /* SSE and x87 registers */
+    cur_th->preempts++;
+    yield(W_RUN);
+    __asm__ volatile("fxrstor64 (%0)" ::"r"(fx) : "memory");
+}
+
 /* Called by the desktop loop: timers, then each program that can run. */
 void win32_poll(void) {
+    tick_hook = preempt_tick;
     for (w32proc_t **pp = &procs; *pp;) {
         w32proc_t *p = *pp;
         if (p->killed && !p->done) p->done = 1;
@@ -1766,7 +1791,13 @@ void win32_poll(void) {
             cur = p;
             cur_th = t;
             set_gs((u64)t->teb);
+            last_error = t->lasterr;
+            errno_ = t->errno_v;
+            slice_end = ticks_ms + SLICE_MS;
             ctx_switch(&kernel_rsp, t->rsp);
+            __asm__ volatile("sti"); /* back from a timer interrupt, interrupts are still off */
+            t->lasterr = last_error;
+            t->errno_v = errno_;
             cur = NULL;
             cur_th = NULL;
         }

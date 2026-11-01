@@ -59,6 +59,7 @@ u32 heap_total(void);
 /* ---- cpu.c ---- */
 #include "arch.h" /* regs_t and REG_IP() for this CPU */
 typedef void (*irq_handler_t)(regs_t *);
+extern irq_handler_t tick_hook;
 void cpu_init(void);
 void irq_install(int irq, irq_handler_t h);
 void pit_init(u32 hz);
