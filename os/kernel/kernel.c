@@ -49,7 +49,11 @@ void kmain(u32 magic, multiboot_info_t *mbi) {
     }
     uptr heap_start = ((uptr)_kernel_end + 0xFFF) & ~(uptr)0xFFF;
     uptr heap_end = (uptr)total_memory_kb * 1024;
-    if (heap_end > 0x20000000) heap_end = 0x20000000; /* 512 MB is plenty */
+#ifdef __x86_64__
+    if (heap_end > 0xC0000000) heap_end = 0xC0000000; /* below the PCI memory window (Telegram alone needs ~600 MB) */
+#else
+    if (heap_end > 0x20000000) heap_end = 0x20000000; /* 512 MB is plenty for the 32-bit web version */
+#endif
     heap_init(heap_start, heap_end);
     klog("memoria: %u MB, montón %u KB\n", total_memory_kb / 1024, heap_total() / 1024);
 

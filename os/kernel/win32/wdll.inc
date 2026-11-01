@@ -342,6 +342,9 @@ static int mods_init(w32proc_t *p, void *reserved) {
 }
 static void mods_thread(w32proc_t *p, u32 reason) {
     for (int i = 0; i < p->ninit; i++) if (p->init_order[i] && p->init_order[i]->inited) mod_notify(p->init_order[i], reason, NULL);
+    /* the .exe's own TLS callbacks hear about threads too (thread_local set-up and clean-up) */
+    if (p->exe && p->exe->tls_cb)
+        for (u64 *cb = (u64 *)p->exe->tls_cb; *cb; cb++) ((void (WINAPI *)(void *, u32, void *))*cb)(p->image, reason, NULL);
 }
 /* ExitProcess: DllMain(PROCESS_DETACH), last loaded first */
 static void mods_detach(w32proc_t *p) {

@@ -11,6 +11,7 @@ MB_CHECKSUM equ -(MB_MAGIC + MB_FLAGS)
 extern _load_start, _load_end, _bss_end
 extern kmain
 global _start
+global pd
 
 section .multiboot
 align 4

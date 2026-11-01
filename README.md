@@ -40,7 +40,8 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
   Chamows pone su propia fuente de iconos (`CHAMOWSI.TTF`) en `WINDOWS\FONTS` la primera vez.
 - **Telegram Desktop (en camino)**: el `Telegram.exe` oficial arranca y muestra su primera ventana
   con texto (Chamows dibuja las letras TrueType con las funciones GDI de Windows, usando stb_truetype).
-  Se cierra al pintar la ventana principal; es el siguiente paso.
+  Ya llega a su ventana principal ("Start Messaging") y a la pantalla para entrar con un código QR.
+  Todavía no conecta con los servidores de Telegram; es el siguiente paso.
 - Ventanas como en Windows 11: botón **maximizar/restaurar** (y doble clic en el título) para los
   programas de Windows que cambian de tamaño, y cada programa con **su propio icono** en el título,
   la barra de tareas y los avisos.

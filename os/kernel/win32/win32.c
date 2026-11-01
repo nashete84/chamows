@@ -38,6 +38,7 @@ typedef struct w32win {
     u32 style, exstyle;
     int activated, hidden;   /* hidden: HWND_MESSAGE windows, never on screen */
     int big_icon;            /* WM_SETICON gave it a big icon */
+    u32 owner;               /* id of the thread that made it: its messages go to that thread */
     struct { char name[32]; u64 v; } props[8];
     dc_t dc;
     wtimer_t timers[48];
@@ -60,6 +61,8 @@ typedef struct w32thread {
     void *ex_chain;      /* exceptions: see wseh.inc */
     u32 lasterr, preempts; /* GetLastError of this thread; times its turn was taken */
     int errno_v;
+    int quit, quit_code;  /* PostQuitMessage: WM_QUIT is per thread, like on Windows */
+    int suspended;        /* CREATE_SUSPENDED / SuspendThread count */
     struct w32thread *next;
 } w32thread_t;
 
@@ -88,7 +91,9 @@ typedef struct w32proc {
     w32thread_t *threads;
     int done, killed, cleaned, quit, exit_code;
     MSG q[QMAX];
+    u32 qtid[QMAX];         /* the thread each queued message is for */
     int qhead, qcount;
+    struct sent *sent;      /* SendMessage from one thread to a window of another */
     w32win_t *wins;
     wclass_t classes[48];
     int nclasses;
@@ -357,15 +362,61 @@ static void con_event(cw_window *cw, const cw_event *ev) {
     if (ev->type == CW_CLOSE) { p->con = NULL; if (!p->done) p->killed = 1; }
 }
 
-/* ---------- messages ---------- */
-static void post(w32proc_t *p, void *hwnd, u32 msg, u64 wp, i64 lp) {
+/* ---------- messages ----------
+ * Like on Windows, each thread has its own queue: a window's messages go to
+ * the thread that made it, and only that thread's GetMessage/PeekMessage sees
+ * them. (Qt keeps a hidden window per thread; with one shared queue a worker
+ * thread ran the main thread's timers and painting.) */
+static u32 main_tid(w32proc_t *p) { return p->threads ? p->threads->id : 0; }
+static u32 win_tid(w32proc_t *p, const w32win_t *w) { return w->owner ? w->owner : main_tid(p); }
+static w32thread_t *thread_by_id(w32proc_t *p, u32 id) {
+    for (w32thread_t *t = p->threads; t; t = t->next) if (t->id == id) return t;
+    return NULL;
+}
+static void post_tid(w32proc_t *p, u32 tid, void *hwnd, u32 msg, u64 wp, i64 lp) {
     if (msg == 0x200 && p->qcount) { /* mouse moves: keep only the newest */
-        MSG *last = &p->q[(p->qhead + p->qcount - 1) % QMAX];
-        if (last->message == 0x200 && last->hwnd == hwnd) { last->wparam = wp; last->lparam = lp; return; }
+        int k = (p->qhead + p->qcount - 1) % QMAX;
+        MSG *last = &p->q[k];
+        if (last->message == 0x200 && last->hwnd == hwnd && p->qtid[k] == tid) { last->wparam = wp; last->lparam = lp; return; }
     }
     if (p->qcount == QMAX) return;
-    MSG *m = &p->q[(p->qhead + p->qcount++) % QMAX];
-    *m = (MSG){hwnd, msg, wp, lp, ticks_ms, 0, 0, 0};
+    int k = (p->qhead + p->qcount++) % QMAX;
+    p->q[k] = (MSG){hwnd, msg, wp, lp, ticks_ms, 0, 0, 0};
+    p->qtid[k] = tid;
+}
+static void post(w32proc_t *p, void *hwnd, u32 msg, u64 wp, i64 lp) {
+    u32 tid = 0;
+    for (w32win_t *x = p->wins; x; x = x->next) if (x == hwnd) { tid = win_tid(p, x); break; }
+    if (!tid) tid = p == cur && cur_th ? cur_th->id : main_tid(p);
+    post_tid(p, tid, hwnd, msg, wp, lp);
+}
+/* the first message queued for thread tid; remove takes it out of the queue */
+static int queued(w32proc_t *p, u32 tid, MSG *m, int remove) {
+    for (int i = 0; i < p->qcount; i++) {
+        int k = (p->qhead + i) % QMAX;
+        if (p->qtid[k] != tid) continue;
+        if (m) *m = p->q[k];
+        if (remove) {
+            for (int j = i; j > 0; j--) {
+                int a = (p->qhead + j) % QMAX, b = (p->qhead + j - 1) % QMAX;
+                p->q[a] = p->q[b];
+                p->qtid[a] = p->qtid[b];
+            }
+            p->qhead = (p->qhead + 1) % QMAX;
+            p->qcount--;
+        }
+        return 1;
+    }
+    return 0;
+}
+/* SendMessage to a window of another thread waits until that thread runs it */
+typedef struct sent { struct sent *next; void *hwnd; u32 msg, tid; u64 wp; i64 lp; i64 result; int done; } sent_t;
+static int has_sent(w32proc_t *p, u32 tid) {
+    for (sent_t *s = p->sent; s; s = s->next) if (s->tid == tid) return 1;
+    return 0;
+}
+static void unlink_sent(w32proc_t *p, sent_t *s) {
+    for (sent_t **pp = &p->sent; *pp; pp = &(*pp)->next) if (*pp == s) { *pp = s->next; return; }
 }
 static w32win_t *W(void *h) {
     w32win_t *w = h;
@@ -596,6 +647,7 @@ static w32win_t *new_win(void) {
     w32win_t *w = p_alloc(sizeof *w, 1);
     w->magic = WIN_MAGIC;
     w->p = cur;
+    w->owner = cur_th ? cur_th->id : 0;
     dc_init(&w->dc, w);
     w->next = cur->wins;
     cur->wins = w;
@@ -682,7 +734,7 @@ static WINAPI int u_DestroyWindow(void *h) {
     if (w->cw) { cw_window *cw = w->cw; w->cw = NULL; win_close(cw); }
     return 1;
 }
-static WINAPI void u_PostQuitMessage(int code) { cur->quit = 1; cur->exit_code = code; }
+static WINAPI void u_PostQuitMessage(int code) { cur_th->quit = 1; cur_th->quit_code = code; cur->exit_code = code; }
 static const icon_t *icon_of(u64 h);
 static WINAPI i64 u_DefWindowProcA(void *h, u32 msg, u64 wp, i64 lp) {
     w32win_t *w = W(h);
@@ -696,13 +748,37 @@ static WINAPI i64 u_DefWindowProcA(void *h, u32 msg, u64 wp, i64 lp) {
     return 0;
 }
 static WINAPI int u_PostMessageA(void *h, u32 msg, u64 wp, i64 lp) { post(cur, h, msg, wp, lp); return 1; }
+/* runs the messages other threads sent to this thread's windows */
+static void run_sent(void) {
+    for (sent_t *s = cur->sent; s; s = s->next) {
+        if (s->tid != cur_th->id) continue;
+        unlink_sent(cur, s);
+        w32win_t *w = W(s->hwnd);
+        s->result = w && w->proc && !w->destroyed ? w->proc(w, s->msg, s->wp, s->lp) : 0;
+        s->done = 1;
+        s = (sent_t *)&cur->sent; /* the list may have changed: start again */
+    }
+}
 static WINAPI i64 u_SendMessageA(void *h, u32 msg, u64 wp, i64 lp) {
     w32win_t *w = W(h);
-    return w && w->proc && !w->destroyed ? w->proc(w, msg, wp, lp) : 0;
+    if (!w || !w->proc || w->destroyed) return 0;
+    w32thread_t *o = thread_by_id(cur, win_tid(cur, w));
+    if (!cur_th || !o || o == cur_th || o->done) return w->proc(w, msg, wp, lp);
+    sent_t s = {NULL, h, msg, o->id, wp, lp, 0, 0};
+    sent_t **pp = &cur->sent;
+    while (*pp) pp = &(*pp)->next;
+    *pp = &s;
+    while (!s.done) {
+        run_sent(); /* two threads sending to each other must not get stuck */
+        if (s.done) break;
+        if (o->done) { unlink_sent(cur, &s); break; }
+        yield(W_RUN);
+    }
+    return s.result;
 }
 static int pending_paint(MSG *m) {
     for (w32win_t *w = cur->wins; w; w = w->next)
-        if (w->dirty && !w->destroyed && w->cw) { *m = (MSG){w, 0xF, 0, 0, ticks_ms, 0, 0, 0}; return 1; }
+        if (w->dirty && !w->destroyed && w->cw && win_tid(cur, w) == cur_th->id) { *m = (MSG){w, 0xF, 0, 0, ticks_ms, 0, 0, 0}; return 1; }
     return 0;
 }
 static void timer_popped(MSG *m) {
@@ -712,9 +788,9 @@ static void timer_popped(MSG *m) {
 }
 /* WM_TIMER is made when it is asked for, like on Windows: only when nothing
  * else is waiting, and never piling up in the queue. */
-static int due_timer(w32proc_t *p, MSG *m, int remove) {
+static int due_timer(w32proc_t *p, u32 tid, MSG *m, int remove) {
     for (w32win_t *w = p->wins; w; w = w->next) {
-        if (w->destroyed) continue;
+        if (w->destroyed || win_tid(p, w) != tid) continue;
         for (int i = 0; i < 48; i++) {
             wtimer_t *t = &w->timers[i];
             if (!t->used || (i32)(ticks_ms - t->next) < 0) continue;
@@ -726,18 +802,18 @@ static int due_timer(w32proc_t *p, MSG *m, int remove) {
     return 0;
 }
 static int next_msg(MSG *m, int remove) {
-    if (cur->qcount) {
-        *m = cur->q[cur->qhead];
-        if (remove) { cur->qhead = (cur->qhead + 1) % QMAX; cur->qcount--; timer_popped(m); }
+    run_sent();
+    if (queued(cur, cur_th->id, m, remove)) {
+        if (remove) timer_popped(m);
         return 1;
     }
     if (pending_paint(m)) return 1;
-    if (cur->quit) {
-        *m = (MSG){NULL, 0x12, (u64)cur->exit_code, 0, ticks_ms, 0, 0, 0};
-        if (remove) cur->quit = 0;
+    if (cur_th->quit) {
+        *m = (MSG){NULL, 0x12, (u64)cur_th->quit_code, 0, ticks_ms, 0, 0, 0};
+        if (remove) cur_th->quit = 0;
         return 1;
     }
-    return due_timer(cur, m, remove);
+    return due_timer(cur, cur_th->id, m, remove);
 }
 static WINAPI int u_GetMessageA(MSG *m, void *h, u32 a, u32 b) {
     flush_windows(cur);
@@ -1329,6 +1405,7 @@ static WINAPI u64 k_CreateThread(void *sa, u64 stack, u64 start, u64 param, u32 
     if (!t) return 0;
     hobj_t *h = hnew(H_THREAD);
     h->th = t;
+    if (flags & 4) t->suspended = 1; /* CREATE_SUSPENDED: waits for ResumeThread */
     if (tid) *tid = t->id;
     return (u64)h;
 }
@@ -1336,6 +1413,25 @@ static WINAPI u64 c__beginthreadex(void *sa, u32 stack, u64 start, u64 param, u3
 static void mods_thread(w32proc_t *p, u32 reason);
 static WINAPI void k_ExitThread(u32 code) { mods_thread(cur, 3); cur_th->exit_code = code; cur_th->done = 1; yield(W_RUN); for (;;) {} }
 static WINAPI u64 k_GetCurrentThread(void) { return (u64)-2; }
+static w32thread_t *thread_of(u64 v) {
+    if (v == (u64)-2) return cur_th;
+    hobj_t *h = H(v);
+    return h && h->kind == H_THREAD ? h->th : NULL;
+}
+static WINAPI u32 k_ResumeThread(u64 v) {
+    w32thread_t *t = thread_of(v);
+    if (!t) return 0xFFFFFFFF;
+    u32 was = (u32)t->suspended;
+    if (t->suspended) t->suspended--;
+    return was;
+}
+static WINAPI u32 k_SuspendThread(u64 v) {
+    w32thread_t *t = thread_of(v);
+    if (!t) return 0xFFFFFFFF;
+    u32 was = (u32)t->suspended++;
+    if (t == cur_th) yield(W_RUN);
+    return was;
+}
 static WINAPI u32 k_GetCurrentThreadId(void) { return cur_th ? cur_th->id : 8; }
 static WINAPI u64 k_CreateEventA(void *sa, int manual, int initial, const void *name) {
     hobj_t *h = hnew(H_EVENT);
@@ -1671,7 +1767,7 @@ static const struct { const char *name; void *fn; } exports2[] = {
     {"InitializeCriticalSectionEx", k_one}, {"AcquireSRWLockExclusive", k_zero}, {"ReleaseSRWLockExclusive", k_zero},
     {"InitializeConditionVariable", k_zero}, {"SleepConditionVariableCS", k_SleepConditionVariableCS},
     {"WakeConditionVariable", k_WakeConditionVariable}, {"WakeAllConditionVariable", k_WakeConditionVariable},
-    {"SetThreadPriority", k_one}, {"GetThreadPriority", k_zero}, {"ResumeThread", k_zero}, {"SuspendThread", k_zero},
+    {"SetThreadPriority", k_one}, {"GetThreadPriority", k_zero}, {"ResumeThread", k_ResumeThread}, {"SuspendThread", k_SuspendThread},
     {"SetThreadExecutionState", k_one}, {"SetProcessAffinityMask", k_one}, {"GetSystemInfo", k_GetSystemInfo},
     {"GlobalMemoryStatusEx", k_GlobalMemoryStatusEx}, {"GetVersionExA", k_GetVersionExA}, {"GetVersionExW", k_GetVersionExA}, {"RtlGetVersion", k_RtlGetVersion},
     {"RtlGetNtVersionNumbers", k_RtlGetNtVersionNumbers},
@@ -1809,7 +1905,55 @@ static w32thread_t *thread_new(w32proc_t *p, void (*entry)(void), u64 start, u64
 int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon) { return pe_run_args(data, size, name, icon, ""); }
 char pe_dir[160];
 int pe_cwd_root; /* started from the terminal: the current folder is the terminal's (the root) */
+/* Like Windows, the first 64 KB are not mapped while .exe programs run, so a
+ * NULL pointer crashes at once instead of quietly reading the BIOS's leftovers.
+ * The first 2 MB move from one big page to 512 small ones. */
+extern u64 pd[];
+static u64 low_pt[512] __attribute__((aligned(4096)));
+static void null_guard(void) {
+    if (low_pt[16]) return;
+    for (int i = 0; i < 512; i++) low_pt[i] = i < 16 ? 0 : (u64)i * 4096 | 3;
+    pd[0] = (u64)(uptr)low_pt | 3;
+    u64 cr3;
+    __asm__ volatile("mov %%cr3, %0\n mov %0, %%cr3" : "=r"(cr3) :: "memory");
+}
+/* The PEB (process block) that programs and their C library read directly:
+ * the .exe's address, an empty module list, the process parameters (command
+ * line, image name) and the Windows version. Layout: PEB at 0, loader data at
+ * 0x400, parameters at 0x600, the image name's text at 0xA00. */
+static void us_set(u8 *us, const u16 *text, u32 chars) {
+    *(u16 *)us = (u16)(chars * 2);
+    *(u16 *)(us + 2) = (u16)(chars * 2 + 2);
+    *(u64 *)(us + 8) = (u64)text;
+}
+static void peb_fill(w32proc_t *p) {
+    u8 *peb = p->peb, *ldr = peb + 0x400, *pp = peb + 0x600;
+    u16 *img = (u16 *)(peb + 0xA00);
+    *(u64 *)(peb + 0x10) = (u64)p->image;
+    *(u64 *)(peb + 0x18) = (u64)ldr;
+    *(u64 *)(peb + 0x20) = (u64)pp;
+    *(u64 *)(peb + 0x30) = 1;                 /* GetProcessHeap's handle */
+    *(u32 *)(peb + 0xB8) = 1;                 /* processors */
+    *(u32 *)(peb + 0x118) = 10;               /* Windows 10.0.19045, like GetVersionEx */
+    *(u32 *)(peb + 0x11C) = 0;
+    *(u16 *)(peb + 0x120) = 19045;
+    *(u32 *)(peb + 0x124) = 2;                /* VER_PLATFORM_WIN32_NT */
+    *(u32 *)ldr = 0x58;                       /* PEB_LDR_DATA: three empty module lists */
+    ldr[4] = 1;
+    for (int i = 0; i < 3; i++) { u64 *l = (u64 *)(ldr + 0x10 + 16 * i); l[0] = l[1] = (u64)l; }
+    *(u32 *)pp = *(u32 *)(pp + 4) = 0x400;    /* RTL_USER_PROCESS_PARAMETERS */
+    *(u32 *)(pp + 8) = 1;                     /* normalized */
+    char path[200];
+    ksnprintf(path, sizeof path, "C:\\%s%s%s", p->exedir, p->exedir[0] ? "\\" : "", p->name);
+    u32 n = 0;
+    for (; path[n] && n < 199; n++) img[n] = path[n] == '/' ? '\\' : (u8)path[n];
+    us_set(pp + 0x60, img, n);
+    u32 cl = 0;
+    while (cl < 255 && p->wcmdline[cl]) cl++;
+    us_set(pp + 0x70, p->wcmdline, cl);
+}
 int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args) {
+    null_guard();
     w32proc_t *p = kzalloc(sizeof *p);
     if (!p) return -1;
     strncpy0(p->name, name, sizeof p->name);
@@ -1855,9 +1999,9 @@ int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, 
         kfree(p);
         return -1;
     }
-    p->peb = kzalloc(0x400);
+    p->peb = kzalloc(0x1000);
     if (!p->peb) { mods_free(p); kfree(p); return -1; }
-    *(u64 *)(p->peb + 0x10) = (u64)p->image;
+    peb_fill(p);
     if (!thread_new(p, fiber_main, 0, 0, 1024 * 1024)) { mods_free(p); kfree(p->peb); kfree(p); return -1; }
     if (console) { cur = p; con_open(p); cur = prev; }
     p->next = procs;
@@ -1890,11 +2034,12 @@ static void proc_free(w32proc_t *p) {
 }
 
 static int ready(w32proc_t *p, w32thread_t *t) {
+    if (t->suspended) return 0;
     switch (t->wait) {
     case W_MSG: {
-        if (p->qcount || p->quit) return 1;
-        for (w32win_t *w = p->wins; w; w = w->next) if (w->dirty && !w->destroyed && w->cw) return 1;
-        return due_timer(p, NULL, 0);
+        if (t->quit || has_sent(p, t->id) || queued(p, t->id, NULL, 0)) return 1;
+        for (w32win_t *w = p->wins; w; w = w->next) if (w->dirty && !w->destroyed && w->cw && win_tid(p, w) == t->id) return 1;
+        return due_timer(p, t->id, NULL, 0);
     }
     case W_SLEEP: return (i32)(ticks_ms - t->wake_at) >= 0;
     case W_BOX: return !p->box_open;
@@ -1957,6 +2102,11 @@ void win32_poll(void) {
             t->errno_v = errno_;
             cur = NULL;
             cur_th = NULL;
+            if (t->done && t != p->threads && t->stack) { /* a finished thread gives back its stack (programs like Telegram start hundreds) */
+                for (int i = 0; i < 16; i++) { kfree(t->tlsb[i]); t->tlsb[i] = NULL; }
+                kfree(t->stack); kfree(t->teb);
+                t->stack = t->teb = NULL;
+            }
         }
         flush_windows(p);
         con_draw(p);

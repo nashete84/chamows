@@ -215,7 +215,11 @@ static WINAPI int g_GetUpdateRect(void *h, RECT *r, int erase) {
     return w && w->dirty;
 }
 static WINAPI u32 g_GetWindowThreadProcessId(void *h, u32 *pid) { if (pid) *pid = 4; return cur_th ? cur_th->id : 1; }
-static WINAPI int g_PostThreadMessageW(u32 tid, u32 msg, u64 wp, i64 lp) { post(cur, NULL, msg, wp, lp); return 1; }
+static WINAPI int g_PostThreadMessageW(u32 tid, u32 msg, u64 wp, i64 lp) {
+    if (!thread_by_id(cur, tid)) return 0;
+    post_tid(cur, tid, NULL, msg, wp, lp);
+    return 1;
+}
 static u32 next_wmsg = 0xC100;
 static WINAPI u32 g_RegisterWindowMessageA(const char *n) { return next_wmsg++; }
 static WINAPI u32 g_GetDoubleClickTime(void) { return 500; }

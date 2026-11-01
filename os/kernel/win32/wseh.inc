@@ -156,6 +156,25 @@ static WINAPI u64 k_RtlPcToFileHeader(u64 pc, u64 *base) { u64 b = 0; mod_at(pc,
 /* An epilogue looks like: [add/lea rsp] pop... ret|jmp. Inside one, the
  * function has already undone part of its prologue, so we finish the job by
  * "executing" those instructions on the context. */
+/* The first part of a function split into pieces ("chained" unwind info). */
+static const runtime_fn_t *fn_primary(u64 base, const runtime_fn_t *fn) {
+    for (int i = 0; fn && i < 32; i++) {
+        const u8 *info = (const u8 *)(base + fn->unwind);
+        if (!((info[0] >> 3) & 4)) return fn;
+        fn = (const runtime_fn_t *)(info + 4 + 2 * ((info[2] + 1) & ~1));
+    }
+    return fn;
+}
+static WINAPI runtime_fn_t *k_RtlLookupFunctionEntry(u64 pc, u64 *base, void *hist);
+/* A jump is a tail call (so an epilogue) only when it leaves the function,
+ * counting every piece of a function that the compiler split up. */
+static int jumps_out(u64 t, u64 fbegin, u64 fend) {
+    if (t >= fbegin && t < fend) return 0;
+    u64 b1 = 0, b2 = 0;
+    runtime_fn_t *here = k_RtlLookupFunctionEntry(fbegin, &b1, NULL), *there = k_RtlLookupFunctionEntry(t, &b2, NULL);
+    if (here && there && b1 == b2 && fn_primary(b1, here)->begin == fn_primary(b2, there)->begin) return 0;
+    return 1;
+}
 static int epilog_at(const u8 *pc, u64 fbegin, u64 fend, int frame_reg) {
     if (pc[0] == 0x48 && pc[1] == 0x83 && pc[2] == 0xc4) pc += 4;
     else if (pc[0] == 0x48 && pc[1] == 0x81 && pc[2] == 0xc4) pc += 7;
@@ -169,8 +188,8 @@ static int epilog_at(const u8 *pc, u64 fbegin, u64 fend, int frame_reg) {
         if ((*pc & 0xf8) == 0x58) { pc++; continue; }
         if (*pc == 0xc3 || *pc == 0xc2) return 1;
         if (*pc == 0xf3 && pc[1] == 0xc3) return 1;
-        if (*pc == 0xe9) { u64 t = (u64)(pc + 5 + *(const i32 *)(pc + 1)); return t < fbegin || t >= fend; }
-        if (*pc == 0xeb) { u64 t = (u64)(pc + 2 + (i8)pc[1]); return t < fbegin || t >= fend; }
+        if (*pc == 0xe9) return jumps_out((u64)(pc + 5 + *(const i32 *)(pc + 1)), fbegin, fend);
+        if (*pc == 0xeb) return jumps_out((u64)(pc + 2 + (i8)pc[1]), fbegin, fend);
         if (*pc == 0xff && pc[1] == 0x25) return 1;
         if (pc[0] == 0x48 && pc[1] == 0xff && pc[2] == 0x25) return 1;
         return 0;
@@ -340,11 +359,19 @@ static WINAPI u32 k_RemoveVectoredExceptionHandler(u64 h) {
     return 0;
 }
 static WINAPI void *k_SetUnhandledExceptionFilter(void *f) { void *old = (void *)unhandled_filter; unhandled_filter = f; return old; }
-static void ex_fatal(ex_rec_t *rec, context_t *c) __attribute__((noreturn));
-static void ex_fatal(ex_rec_t *rec, context_t *c) {
+/* an exception nobody handled: what it was and where it came from, in the log */
+static void ex_report(ex_rec_t *rec, context_t *c) {
     u64 b = 0;
     w32mod_t *m = mod_at(rec->address, &b);
-    klog("exe: %s se cerró: excepción %x en %s+0x%x\n", cur->name, rec->code, m ? m->name : "?", (u32)(rec->address - b));
+    klog("exe: %s: excepción %x sin manejar en %s+0x%x (hilo %u)\n", cur->name, rec->code, m ? m->name : "?", (u32)(rec->address - b), cur_th->id);
+    if (rec->code == 0xE06D7363 && rec->nparams >= 4 && rec->info[2] && rec->info[3]) { /* C++ throw: the type's name */
+        const u8 *ib = (const u8 *)rec->info[3], *ti = (const u8 *)rec->info[2];
+        const u8 *cta = ib + *(const u32 *)(ti + 12);
+        if (*(const u32 *)cta) {
+            const u8 *ct = ib + *(const u32 *)(cta + 4);
+            klog("exe:   excepción C++ de tipo %s\n", (const char *)(ib + *(const u32 *)(ct + 4) + 16));
+        }
+    }
     if ((rec->code == 0xC06D007E || rec->code == 0xC06D007F) && rec->info[0]) { /* delay-load: which DLL and function */
         const u8 *dli = (const u8 *)rec->info[0];
         const char *dll = *(const char **)(dli + 24), *fn = *(const char **)(dli + 40);
@@ -357,13 +384,25 @@ static void ex_fatal(ex_rec_t *rec, context_t *c) {
         dispatcher_t d;
         memset(&d, 0, sizeof d);
         d.context = &t;
-        for (int i = 0; i < 12 && step(0, &d, &t); i++) {
+        if (!m && !in_chamows(rec->address) && CXQ(&t, CX_RSP)) { /* a call to a bad address: the caller is on top of the stack */
+            u64 mb2 = 0, ra = *(u64 *)CXQ(&t, CX_RSP);
+            w32mod_t *rm = mod_at(ra, &mb2);
+            if (rm) { klog("exe:   llamada desde %s+0x%x\n", rm->name, (u32)(ra - mb2)); CXQ(&t, CX_RIP) = ra; CXQ(&t, CX_RSP) += 8; }
+        }
+        for (int i = 0, n = 0; i < 40 && n < 12 && step(0, &d, &t); i++) {
             u64 ip = CXQ(&t, CX_RIP), mb = 0;
             w32mod_t *mm = mod_at(ip, &mb);
-            if (!mm) break;
+            if (!mm) continue; /* through Chamows code (a catch block, a callback): keep going */
             klog("exe:   llamada desde %s+0x%x\n", mm->name, (u32)(ip - mb));
+            n++;
         }
     }
+}
+static void ex_fatal(ex_rec_t *rec, context_t *c) __attribute__((noreturn));
+static void ex_fatal(ex_rec_t *rec, context_t *c) {
+    u64 b = 0;
+    w32mod_t *m = mod_at(rec->address, &b);
+    klog("exe: %s se cerró por la excepción %x\n", cur->name, rec->code);
     char msg[120];
     ksnprintf(msg, sizeof msg, "Error %x en %s. El programa se cerró.", rec->code, m ? m->name : "Chamows");
     notify(cur->icon, cur->name, msg);
@@ -392,6 +431,7 @@ static void dispatch(ex_rec_t *rec, context_t *orig) {
             }
         }
     }
+    ex_report(rec, orig);
     if (unhandled_filter && unhandled_filter(ptrs) == -1) k_RtlRestoreContext(orig, NULL);
     ex_fatal(rec, orig);
 }

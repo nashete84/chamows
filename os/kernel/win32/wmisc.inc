@@ -335,7 +335,7 @@ static WINAPI u32 m_MsgWaitForMultipleObjectsEx(u32 n, const u64 *hs, u32 ms, u3
             for (u32 i = 0; i < n; i++) if (try_take(hs[i])) return i;
         /* a 0 ms check without MWMO_INPUTAVAILABLE asks for *new* input only: a timer that fell
          * due while the last empty PeekMessage yielded is not new (Qt's loop spins on it otherwise) */
-        if (ms == 0 && !(fl & 4) ? (cur->qcount || pending_paint(&m)) : next_msg(&m, 0)) return n;
+        if (ms == 0 && !(fl & 4) ? (has_sent(cur, cur_th->id) || queued(cur, cur_th->id, NULL, 0) || pending_paint(&m)) : next_msg(&m, 0)) return n;
         if (ms == 0 || (ms != 0xFFFFFFFF && ticks_ms - start >= ms)) return 0x102;
         flush_windows(cur);
         yield(W_RUN);
@@ -345,12 +345,13 @@ static WINAPI u32 m_MsgWaitForMultipleObjectsEx(u32 n, const u64 *hs, u32 ms, u3
 static WINAPI u32 m_GetQueueStatus(u32 fl) {
     u32 have = 0;
     for (int i = 0; i < cur->qcount; i++) {
+        if (cur->qtid[(cur->qhead + i) % QMAX] != cur_th->id) continue;
         u32 msg = cur->q[(cur->qhead + i) % QMAX].message;
         have |= msg >= 0x100 && msg <= 0x109 ? 1 : msg == 0x200 ? 2 : msg >= 0x201 && msg <= 0x20E ? 4 : 8;
     }
     MSG m;
     if (pending_paint(&m)) have |= 0x20;
-    if (due_timer(cur, NULL, 0)) have |= 0x10;
+    if (due_timer(cur, cur_th->id, NULL, 0)) have |= 0x10;
     have &= fl;
     return have << 16 | have;
 }
@@ -501,18 +502,29 @@ static WINAPI int m_AllocateAndInitializeSid(void *auth, u8 n, u32 a0, u32 a1, u
     return 1;
 }
 static WINAPI void *m_FreeSid(void *s) { p_free(s); return NULL; }
-static WINAPI u32 m_GetLengthSid(const u8 *s) { return 8 + 4u * s[1]; }
+static WINAPI u32 m_GetLengthSid(const u8 *s) { return s ? 8 + 4u * s[1] : 0; }
 static WINAPI int m_CopySid(u32 n, void *d, const u8 *s) { memcpy(d, s, m_GetLengthSid(s)); return 1; }
 static WINAPI u8 *m_GetSidSubAuthorityCount(u8 *s) { return s + 1; }
 static WINAPI u32 *m_GetSidSubAuthority(u8 *s, u32 i) { return (u32 *)(s + 8 + 4 * i); }
+static const u8 medium_sid[12] = {1, 1, 0, 0, 0, 0, 0, 16, 0, 0x20, 0, 0}; /* S-1-16-8192: medium integrity */
 static WINAPI int m_GetTokenInformation(u64 tok, int cls, u8 *buf, u32 n, u32 *ret) {
-    /* TokenUser (1) and TokenOwner/TokenPrimaryGroup: a pointer to a SID, then the SID */
-    u32 need = 16 + 12;
+    /* User 1, Groups 2, Owner 4, PrimaryGroup 5, Elevation 20, IntegrityLevel 25 */
+    u32 need = cls == 2 ? 24 + 12 : cls == 20 ? 4 : 16 + 12;
+    if (cls != 1 && cls != 2 && cls != 4 && cls != 5 && cls != 20 && cls != 25) { last_error = 87; return 0; }
     if (ret) *ret = need;
-    if (n < need) { last_error = 122; return 0; }
+    if (!buf || n < need) { last_error = 122; return 0; }
     memset(buf, 0, need);
-    *(u8 **)buf = buf + 16;
-    memcpy(buf + 16, world_sid, 12);
+    if (cls == 20) return 1;                     /* not elevated */
+    if (cls == 2) {                              /* one group: everyone */
+        *(u32 *)buf = 1;
+        *(u8 **)(buf + 8) = buf + 24;
+        *(u32 *)(buf + 16) = 4 | 2;              /* enabled, enabled by default */
+        memcpy(buf + 24, world_sid, 12);
+        return 1;
+    }
+    *(u8 **)buf = buf + 16;                      /* a pointer to the SID (plus attributes), then the SID */
+    memcpy(buf + 16, cls == 25 ? medium_sid : world_sid, 12);
+    if (cls == 25) *(u32 *)(buf + 8) = 0x20;     /* SE_GROUP_INTEGRITY */
     return 1;
 }
 static WINAPI int m_LookupAccountSidW(const u16 *sys, void *sid, u16 *name, u32 *nn, u16 *dom, u32 *dn, u32 *use) {
@@ -641,11 +653,30 @@ static void rt_fill(void **vt) {
     vt[0] = rt_QueryInterface; vt[1] = rt_AddRef; vt[2] = rt_AddRef; /* Release: static object */
     vt[3] = rt_GetIids; vt[4] = rt_GetRuntimeClassName; vt[5] = rt_GetTrustLevel;
 }
+/* Windows.Storage.Streams.DataWriter: Telegram makes one for the media keys
+ * panel and stops if it cannot. It exists, but every method says "not implemented". */
+static void *dw_vt[40], *dwfact_vt[8];
+static rt_obj dw = {dw_vt}, dwfact = {dwfact_vt};
+static WINAPI u32 rt_ActivateDataWriter(rt_obj *o, void **out) { *out = &dw; return 0; }
+static int hstr_is(const hstr_t *h, const char *want) {
+    u32 n = (u32)strlen(want);
+    if (!h || h->len != n) return 0;
+    for (u32 i = 0; i < n; i++) if (h->buf[i] != (u16)want[i]) return 0;
+    return 1;
+}
 static WINAPI u32 m_RoGetActivationFactory(hstr_t *cls, const u32 *iid, void **out) {
-    static const char want[] = "Windows.UI.ViewManagement.UISettings";
     *out = NULL;
-    int ok = cls && cls->len == sizeof want - 1;
-    for (u32 i = 0; ok && i < cls->len; i++) ok = cls->buf[i] == (u16)want[i];
+    if (hstr_is(cls, "Windows.Storage.Streams.DataWriter")) {
+        if (!dwfact_vt[0]) {
+            rt_fill(dwfact_vt);
+            dwfact_vt[6] = rt_ActivateDataWriter;
+            rt_fill(dw_vt);
+            for (int i = 6; i < 40; i++) dw_vt[i] = rt_notimpl;
+        }
+        *out = &dwfact;
+        return 0;
+    }
+    int ok = hstr_is(cls, "Windows.UI.ViewManagement.UISettings");
     if (!ok) { char nm[96]; u32 i = 0; for (; cls && i < cls->len && i < 95; i++) nm[i] = (char)cls->buf[i]; nm[i] = 0; klog("exe: clase WinRT %s no existe\n", nm); }
     if (!ok) return 0x80040154; /* REGDB_E_CLASSNOTREG */
     if (!uifact_vt[0]) {
@@ -751,6 +782,34 @@ static WINAPI u32 m_GetPriorityClass(u64 h) { return 0x20; } /* NORMAL_PRIORITY_
 static WINAPI int m_GetUserDefaultLocaleName(u16 *out, int n) { return (int)a2w("en-US", out, (u32)n) + 1; }
 static WINAPI void m_GetCurrentProcessorNumberEx(u16 *pn) { pn[0] = 0; ((u8 *)pn)[2] = 0; }
 static WINAPI int m_GetNumaHighestNodeNumber(u32 *n) { *n = 0; return 1; }
+/* One processor, one core, one package, one NUMA node, one group. Microsoft's
+ * task scheduler (ConcRT) asks this first for the size, and stops if the
+ * answer is not "buffer too small". */
+static int lpi_add(u8 *out, u32 room, u32 at, u32 rel) {
+    u32 size = rel == 4 ? 80 : 48;
+    if (out && at + size <= room) {
+        u8 *e = out + at;
+        memset(e, 0, size);
+        *(u32 *)e = rel;
+        *(u32 *)(e + 4) = size;
+        u8 *u = e + 8;
+        if (rel == 0 || rel == 3) { *(u16 *)(u + 22) = 1; *(u64 *)(u + 24) = 1; }       /* core / package */
+        else if (rel == 1) { *(u16 *)(u + 22) = 1; *(u64 *)(u + 24) = 1; }              /* NUMA node 0 */
+        else if (rel == 4) { *(u16 *)u = 1; *(u16 *)(u + 2) = 1; u[24] = 1; u[25] = 1; *(u64 *)(u + 64) = 1; } /* group 0 */
+    }
+    return (int)size;
+}
+static WINAPI int m_GetLogicalProcessorInformationEx(u32 rel, u8 *buf, u32 *len) {
+    if (!len) { last_error = 87; return 0; }
+    static const u32 all[4] = {0, 1, 3, 4};
+    u32 need = 0;
+    for (int i = 0; i < 4; i++) if (rel == 0xFFFF || rel == all[i]) need += (u32)lpi_add(NULL, 0, 0, all[i]);
+    if (!buf || *len < need) { *len = need; last_error = 122; return 0; }
+    u32 at = 0;
+    for (int i = 0; i < 4; i++) if (rel == 0xFFFF || rel == all[i]) at += (u32)lpi_add(buf, *len, at, all[i]);
+    *len = at;
+    return 1;
+}
 static WINAPI int m_CheckRemoteDebuggerPresent(u64 h, int *b) { if (b) *b = 0; return 1; }
 static WINAPI int m_GetThreadGroupAffinity(u64 h, u8 *ga) { memset(ga, 0, 16); *(u64 *)ga = 1; return 1; }
 static WINAPI u32 m_GetSystemDirectoryA(char *b, u32 n) { const char *d = "C:\\WINDOWS\\SYSTEM32"; u32 l = (u32)strlen(d); if (l + 1 > n) return l + 1; strncpy0(b, d, n); return l; }
@@ -854,7 +913,7 @@ static const struct { const char *name; void *fn; } exports_misc[] = {
     {"GetNumaHighestNodeNumber", m_GetNumaHighestNodeNumber}, {"CheckRemoteDebuggerPresent", m_CheckRemoteDebuggerPresent},
     {"GetThreadGroupAffinity", m_GetThreadGroupAffinity}, {"SetThreadGroupAffinity", k_one}, {"GetSystemDirectoryA", m_GetSystemDirectoryA},
     {"RtlNtStatusToDosError", m_RtlNtStatusToDosError}, {"GetConsoleOutputCP", m_GetConsoleOutputCP}, {"SetStdHandle", k_one},
-    {"GetThreadId", m_GetThreadId}, {"DebugBreak", k_zero}, {"GetLogicalProcessorInformationEx", m_fail}, {"OpenThread", k_zero},
+    {"GetThreadId", m_GetThreadId}, {"DebugBreak", k_zero}, {"GetLogicalProcessorInformationEx", m_GetLogicalProcessorInformationEx}, {"OpenThread", k_zero},
     {"RoInitialize", k_zero}, {"RoUninitialize", k_zero}, {"GetTempPath2W", f_GetTempPathW},
     {"GetAwarenessFromDpiAwarenessContext", m_awareness}, {"GetProcessDpiAwareness", m_GetProcessDpiAwareness}, {"SetProcessDpiAwareness", k_zero},
     /* graphics and text through COM: not here, and saying so lets programs pick their fallback */
