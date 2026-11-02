@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "ecc": {
+      "source": { "source": "github", "repo": "affaan-m/ecc" }
+    },
+    "ponytail": {
+      "source": { "source": "github", "repo": "dietrichgebert/ponytail" }
+    }
+  },
+  "enabledPlugins": {
+    "ecc@ecc": true,
+    "ponytail@ponytail": true
+  }
+}
