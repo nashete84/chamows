@@ -11,16 +11,51 @@ la tienda y las apps están escritos aquí, en C y ensamblador.
 - **USB** (controlador xHCI): teclados, ratones, tabletas y pendrives.
 - **Pendrive FAT32**: las apps instaladas se guardan en `D:\CHAMOWS\APPS64` y vuelven
   al reiniciar. Sin pendrive viven en memoria.
-- Escritorio con iconos, barra de tareas centrada, menú Inicio con buscador,
-  ventanas que se mueven, minimizan y cierran, notificaciones y reloj.
+- Aspecto moderno ("Windows 12" a nuestra manera): barra de tareas flotante en
+  tres piezas, paneles de vidrio (fondo difuminado), esquinas redondeadas,
+  panel de **Widgets** (reloj, calendario, memoria) y **modo oscuro / claro**.
+- **Programas .exe de Windows** (solo 64 bits): cargador PE propio y un mini
+  Win32 (consola, ventanas, dibujo GDI, temporizadores, MessageBox). Sirve para
+  programas pequeños compilados con MinGW; no abre programas grandes como
+  Office, Steam o Chrome. Desde la Tienda o con `ejecutar JUEGOS\JUEGO.EXE`.
+  También hilos, archivos del pendrive (C:\ y D:\, nombres largos) y lo que
+  usa SDL2: el **ScummVM oficial de Windows (64 bits) abre su menú** y se
+  maneja con ratón y teclado; The Secret of Monkey Island se juega. Sin sonido
+  ni música, sin OpenGL y sin teclas F1-F12.
+  Para probarlo: copia el contenido del zip de ScummVM al pendrive y ejecuta
+  `ejecutar scummvm.exe` (QEMU necesita `-m 1024`). Un juego directo:
+  `ejecutar scummvm.exe -p MONKEY --auto-detect`.
+- **Red** (tarjeta Intel e1000): DHCP, DNS, ping y TCP. En la terminal: `red`,
+  `ping <equipo>`, `nslookup <nombre>` y `http <equipo[:puerto]> [ruta]`.
+  Los programas .exe tienen Winsock: sockets TCP y UDP, select, WSAAsyncSelect y getaddrinfo.
+- **DLL**: los .exe cargan sus propias DLL desde el pendrive (junto al programa,
+  la carpeta actual o `C:\CHAMOWS\SYSTEM`), con DllMain, TLS, LoadLibrary y GetProcAddress.
+  Probado con el SDL2.dll oficial.
+- **Hilos con turnos**: si un hilo de un .exe no suelta la CPU, el reloj se la quita cada 20 ms;
+  el escritorio no se congela y los cerrojos de Windows (secciones críticas, SRW, variables de condición) funcionan.
+- **Qt 6 (paso 5 hacia Telegram)**: las DLL oficiales de Qt 6.12 (MSVC) funcionan. `rcc.exe` compila
+  archivos .qrc y **Qt Designer abre y se usa**: menús desplegables, diálogos, ratón y teclado.
+  Las fuentes TrueType se ponen en `WINDOWS\FONTS` del pendrive (por ejemplo DejaVu Sans).
+  Los programas Qt usan el aspecto **Windows 11** (botones redondeados, acento azul, menús translúcidos);
+  Chamows pone su propia fuente de iconos (`CHAMOWSI.TTF`) en `WINDOWS\FONTS` la primera vez.
+- **Telegram Desktop (en camino)**: el `Telegram.exe` oficial arranca y muestra su primera ventana
+  con texto (Chamows dibuja las letras TrueType con las funciones GDI de Windows, usando stb_truetype).
+  Ya llega a su ventana principal ("Start Messaging") y a la pantalla para entrar con un código QR.
+  Todavía no conecta con los servidores de Telegram; es el siguiente paso.
+- Ventanas como en Windows 11: botón **maximizar/restaurar** (y doble clic en el título) para los
+  programas de Windows que cambian de tamaño, y cada programa con **su propio icono** en el título,
+  la barra de tareas y los avisos.
 - Teclado español (ñ, tildes con tecla muerta, AltGr) y ratón PS/2.
 - **Tienda Chamows**: instala apps desde el disco del sistema a `C:\Apps`.
   Cada app es un programa ELF separado que el núcleo carga y enlaza al vuelo.
-- Apps: Calculadora, Bloc de notas, Paint, Reloj (con cronómetro) y Serpiente.
+- **Explorador de archivos**: Apps (C:) y pendrive (D:), carpetas, abrir .exe y
+  archivos de texto, crear carpetas y eliminar archivos.
+- Apps: Calculadora, Bloc de notas, Paint, Reloj (con cronómetro), Serpiente y
+  Burbujas. Programas .exe: Hola Windows (consola) y el juego Esquiva.
 - Terminal con `ayuda`, `apps`, `instalar <id>`, `desinstalar <id>`, `abrir <id>`,
-  `usb`, `dir [carpeta]`, `mem`, `hora`, `ver`, `cls`, `reiniciar` y `apagar`.
+  `usb`, `dir [carpeta]`, `ejecutar <archivo.exe>`, `mem`, `hora`, `ver`, `cls`, `reiniciar` y `apagar`.
 
-Límites actuales: no hay red ni disco duro interno, no se admiten hubs USB
+Límites actuales: no hay navegador ni disco duro interno, no se admiten hubs USB
 (los dispositivos van directos al equipo), los nombres de archivo son 8.3 y
 las apps corren con los mismos permisos que el núcleo.
 

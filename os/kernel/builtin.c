@@ -2,6 +2,7 @@
 #include "gui.h"
 #include "fat.h"
 #include "usb/usb.h"
+#include "net/net.h"
 
 #define C_TEXT   0xFF1B1D24
 #define C_MUTED  0xFF6B7080
@@ -13,6 +14,7 @@ int launch(const char *id) {
     if (strcmp(id, "store") == 0) { store_open(); return 0; }
     if (strcmp(id, "terminal") == 0) { terminal_open(); return 0; }
     if (strcmp(id, "pc") == 0) { pc_open(); return 0; }
+    if (strcmp(id, "explorer") == 0) { explorer_open(); return 0; }
     installed_app_t *a = installed_find(id);
     if (!a) return -1;
     return app_run(a);
@@ -182,7 +184,7 @@ static void term_draw(cw_window *w) {
 }
 
 static void t_cmd(cw_window *w, term_t *t, char *line) {
-    char out[160];
+    char out[256];
     char *cmd = line, *arg = line;
     while (*arg && *arg != ' ') arg++;
     if (*arg) *arg++ = 0;
@@ -202,8 +204,83 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
                    "  ver                 versión de Chamows\n"
                    "  usb                 dispositivos USB conectados\n"
                    "  dir [carpeta]       archivos del pendrive (D:)\n"
+                   "  ejecutar <archivo>  abre un programa .exe del pendrive\n"
+                   "  red [dns <ip>]      estado de la red (o elegir el DNS)\n"
+                   "  ping <equipo>       comprueba si un equipo responde\n"
+                   "  nslookup <nombre>   dirección de un nombre (DNS)\n"
+                   "  http <equipo[:puerto]> [ruta]  descarga una página\n"
                    "  cls                 limpia la pantalla\n"
                    "  reiniciar | apagar");
+    } else if (!strcmp(cmd, "red") && !strncmp(arg, "dns ", 4)) {
+        char a[16];
+        int k = 0;
+        const char *q = arg + 4;
+        while (*q && *q != ':' && k < 15) a[k++] = *q++;
+        a[k] = 0;
+        u16 port = 0;
+        if (*q == ':') for (q++; *q >= '0' && *q <= '9'; q++) port = (u16)(port * 10 + (*q - '0'));
+        u32 ip = ip_parse(a);
+        if (!ip) { t_print(t, "Uso: red dns <dirección>[:puerto]"); return; }
+        net_set_dns(ip, port);
+        t_print(t, "Servidor DNS cambiado.");
+    } else if (!strcmp(cmd, "red")) {
+        if (!nic_ready) { t_print(t, "No hay tarjeta de red (Chamows usa la Intel e1000)."); return; }
+        char a[16], m[16], g[16], d[16];
+        ip_str(net_ip, a); ip_str(net_mask, m); ip_str(net_gw, g); ip_str(net_dns, d);
+        ksnprintf(out, sizeof out, "  Tarjeta: e1000 %02x:%02x:%02x:%02x:%02x:%02x\n  Dirección: %s\n  Máscara: %s\n  Puerta de enlace: %s\n  DNS: %s",
+                  nic_mac[0], nic_mac[1], nic_mac[2], nic_mac[3], nic_mac[4], nic_mac[5],
+                  net_ip ? a : "(esperando DHCP)", m, g, d);
+        t_print(t, out);
+    } else if (!strcmp(cmd, "ping") || !strcmp(cmd, "nslookup")) {
+        if (!net_up()) { t_print(t, "La red no está lista (escribe 'red')."); return; }
+        if (!*arg) { t_print(t, "Uso: ping <equipo>"); return; }
+        u32 ip;
+        char a[16];
+        if (net_resolve(arg, &ip, 4000) != 0) { t_print(t, "No encuentro ese nombre."); return; }
+        ip_str(ip, a);
+        if (cmd[0] == 'n') { ksnprintf(out, sizeof out, "  %s -> %s", arg, a); t_print(t, out); return; }
+        for (int i = 0; i < 3; i++) {
+            int ms = net_ping(ip, 2000);
+            if (ms < 0) ksnprintf(out, sizeof out, "  %s: sin respuesta", a);
+            else ksnprintf(out, sizeof out, "  Respuesta de %s: %d ms", a, ms);
+            t_print(t, out);
+        }
+    } else if (!strcmp(cmd, "http")) {
+        if (!net_up()) { t_print(t, "La red no está lista (escribe 'red')."); return; }
+        char host[64], path[128] = "/";
+        int k = 0;
+        u16 port = 80;
+        while (*arg && *arg != ' ' && *arg != ':' && k < 63) host[k++] = *arg++;
+        host[k] = 0;
+        if (*arg == ':') { arg++; port = 0; while (*arg >= '0' && *arg <= '9') port = (u16)(port * 10 + (*arg++ - '0')); }
+        while (*arg == ' ') arg++;
+        if (*arg) strncpy0(path, arg, sizeof path);
+        if (!k) { t_print(t, "Uso: http <equipo[:puerto]> [ruta]"); return; }
+        u32 ip;
+        if (net_resolve(host, &ip, 4000) != 0) { t_print(t, "No encuentro ese nombre."); return; }
+        int s = tcp_connect(ip, port);
+        u32 start = ticks_ms;
+        while (s >= 0 && tcp_state(s) == TCP_SYN_SENT && ticks_ms - start < 5000) net_wait(10);
+        if (s < 0 || tcp_state(s) != TCP_ESTABLISHED) { t_print(t, "No se pudo conectar."); if (s >= 0) tcp_close(s); return; }
+        char req[256];
+        ksnprintf(req, sizeof req, "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Chamows\r\n\r\n", path, host);
+        tcp_send(s, req, (u32)strlen(req));
+        static char page[1200];
+        u32 got = 0, total = 0;
+        start = ticks_ms;
+        for (;;) {
+            char buf[512];
+            int n = tcp_recv(s, buf, sizeof buf);
+            if (n < 0) break;
+            if (n == 0) { if (ticks_ms - start > 8000) break; net_wait(5); continue; }
+            total += (u32)n;
+            for (int i = 0; i < n && got < sizeof page - 1; i++) if (buf[i] != '\r') page[got++] = buf[i];
+        }
+        page[got] = 0;
+        tcp_close(s);
+        t_print(t, page);
+        ksnprintf(out, sizeof out, "[%u bytes recibidos]", total);
+        t_print(t, out);
     } else if (!strcmp(cmd, "apps")) {
         t_print(t, "  store               Tienda Chamows (sistema)\n  terminal            Terminal (sistema)\n  pc                  Este equipo (sistema)");
         for (int i = 0; i < installed_count(); i++) {
@@ -268,6 +345,28 @@ static void t_cmd(cw_window *w, term_t *t, char *line) {
             t_print(t, out);
         }
         if (!n) t_print(t, "  (vacía)");
+    } else if (!strcmp(cmd, "ejecutar") || !strcmp(cmd, "run")) {
+        if (!fat_mounted) { t_print(t, "Copia el .exe a un pendrive FAT32 y conéctalo para ejecutarlo."); return; }
+        char path[64];
+        int k = 0;
+        const char *a = arg;
+        if ((a[0] == 'd' || a[0] == 'D') && a[1] == ':') a += 2;
+        while (*a == '\\' || *a == '/') a++;
+        for (; *a && *a != ' ' && k < 63; a++) path[k++] = *a == '\\' ? '/' : (*a >= 'a' && *a <= 'z') ? (char)(*a - 32) : *a;
+        path[k] = 0;
+        if (k < 5 || strcmp(path + k - 4, ".EXE") != 0) { t_print(t, "Uso: ejecutar JUEGOS\\PROGRAMA.EXE"); return; }
+        u8 *data;
+        u32 size;
+        if (fat_read(path, &data, &size) != 0) { t_print(t, "No encuentro ese archivo en el pendrive."); return; }
+        const char *name = path;
+        for (const char *q = path; *q; q++) if (*q == '/') name = q + 1;
+        while (*a == ' ') a++;
+        strncpy0(pe_dir, path, sizeof pe_dir);
+        pe_dir[name - path ? name - path - 1 : 0] = 0; /* the .exe's folder */
+        pe_cwd_root = 1;
+        int rc = pe_run_args(data, size, name, &ICON_APP, a);
+        kfree(data);
+        t_print(t, rc == 0 ? "Programa abierto." : "No se pudo abrir el programa.");
     } else if (!strcmp(cmd, "cls") || !strcmp(cmd, "clear")) {
         t->n = 0;
     } else if (!strcmp(cmd, "reiniciar")) {
@@ -376,4 +475,5 @@ void pc_open(void) {
 void builtins_refresh(void) {
     if (store_win) store_draw();
     if (pc_win) pc_draw();
+    explorer_refresh();
 }

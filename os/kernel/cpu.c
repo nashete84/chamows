@@ -38,6 +38,7 @@ static struct { u16 limit; uptr base; } __attribute__((packed)) idtr;
 extern uptr isr_stub_table[48];
 
 static irq_handler_t irq_handlers[16];
+irq_handler_t tick_hook, fault_hook; /* win32.c: takes the CPU from a Windows thread whose turn is over */
 volatile u32 ticks_ms;
 static u32 ms_per_tick = 10;
 
@@ -53,6 +54,7 @@ void panic_screen(const char *msg, u32 eip); /* gui.c */
 
 void isr_dispatch(regs_t *r) {
     if (r->int_no < 32) {
+        if (fault_hook) fault_hook(r); /* a Windows program's crash: returns only if it was not one */
         const char *name = r->int_no < 20 ? exc_names[r->int_no] : "excepcion";
         klog("\n*** EXCEPCION %u (%s) ip=%x err=%x\n", (u32)r->int_no, name, (u32)REG_IP(r), (u32)r->err_code);
         panic_screen(name, (u32)REG_IP(r));
@@ -63,6 +65,8 @@ void isr_dispatch(regs_t *r) {
     if (irq_handlers[irq]) irq_handlers[irq](r);
     if (irq >= 8) outb(0xA0, 0x20);
     outb(0x20, 0x20);
+    /* after the EOI: the hook may switch to another thread and come back later */
+    if (irq == 0 && tick_hook) tick_hook(r);
 }
 
 void irq_install(int irq, irq_handler_t h) {

@@ -1,6 +1,6 @@
 /* Chamows FAT32 driver: enough to keep files on a pendrive.
  * Supports a whole-disk FAT32 or the first FAT32 partition of an MBR disk,
- * 512-byte sectors, 8.3 names, subfolders, create/replace/delete. */
+ * 512-byte sectors, 8.3 and long names, subfolders, create/replace/delete. */
 #include "fat.h"
 #include "usb/usb.h"
 
@@ -179,42 +179,143 @@ static void from83(const char *n, char out[13]) {
 
 static u32 ent_cluster(const dirent_t *e) { return (u32)e->clus_hi << 16 | e->clus_lo; }
 
-/* Finds name83 in directory `dir`. On success copies the entry and where it lives. */
+/* Long names: LFN entries come before the short entry, last part first.
+ * Each holds 13 UTF-16 characters; we keep the ASCII/Latin-1 ones. */
+typedef struct { char s[256]; int ok; u8 sum; } lfn_t;
+static u8 lfn_sum(const char *n83) { u8 s = 0; for (int i = 0; i < 11; i++) s = (u8)(((s & 1) << 7) + (s >> 1) + (u8)n83[i]); return s; }
+static void lfn_add(lfn_t *l, const u8 *e) {
+    static const u8 off[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+    int ord = e[0] & 0x1F;
+    if (e[0] & 0x40) { memset(l->s, 0, sizeof l->s); l->ok = 1; l->sum = e[13]; }
+    if (!l->ok || ord < 1 || e[13] != l->sum) { l->ok = 0; return; }
+    for (int k = 0; k < 13; k++) {
+        int pos = (ord - 1) * 13 + k;
+        u16 ch = (u16)(e[off[k]] | e[off[k] + 1] << 8);
+        if (ch == 0 || ch == 0xFFFF) break;
+        if (pos < 255) l->s[pos] = ch < 256 ? (char)ch : '_';
+    }
+}
+static int same_name(const char *a, const char *b, int blen) {
+    for (int i = 0; i < blen; i++) {
+        char x = a[i], y = b[i];
+        if (x >= 'a' && x <= 'z') x = (char)(x - 32);
+        if (y >= 'a' && y <= 'z') y = (char)(y - 32);
+        if (x != y || !x) return 0;
+    }
+    return a[blen] == 0;
+}
+
+/* Finds the name s[0..len) (8.3 or long) in directory `dir`.
+ * On success copies the entry and where it lives. */
 typedef struct { u32 cluster, index; } loc_t;
-static int dir_find(u32 dir, const char name83[11], dirent_t *out, loc_t *loc) {
+static int dir_find_name(u32 dir, const char *s, int len, dirent_t *out, loc_t *loc, char *lname) {
+    char n83[11];
+    int has83 = to83(s, len, n83) == 0;
+    lfn_t l = {{0}, 0, 0};
     for (u32 c = dir; c >= 2 && c < EOC; c = fat_get(c)) {
         if (read_cluster(c) != 0) return -1;
         dirent_t *e = (dirent_t *)clbuf;
         for (u32 i = 0; i < clbytes / 32; i++) {
             if (e[i].name[0] == 0) return -1;
-            if ((u8)e[i].name[0] == 0xE5 || e[i].attr == ATTR_LFN || (e[i].attr & ATTR_VOLUME)) continue;
-            if (memcmp(e[i].name, name83, 11) == 0) {
+            if ((u8)e[i].name[0] == 0xE5) { l.ok = 0; continue; }
+            if (e[i].attr == ATTR_LFN) { lfn_add(&l, (const u8 *)&e[i]); continue; }
+            int longok = l.ok && l.sum == lfn_sum(e[i].name);
+            l.ok = 0;
+            if (e[i].attr & ATTR_VOLUME) continue;
+            if ((has83 && memcmp(e[i].name, n83, 11) == 0) || (longok && same_name(l.s, s, len))) {
                 if (out) *out = e[i];
                 if (loc) { loc->cluster = c; loc->index = i; }
+                if (lname) { if (longok) strncpy0(lname, l.s, 256); else from83(e[i].name, lname); }
                 return 0;
             }
         }
     }
     return -1;
 }
+static int dir_find(u32 dir, const char name83[11], dirent_t *out, loc_t *loc) {
+    char s[13];
+    from83(name83, s);
+    return dir_find_name(dir, s, (int)strlen(s), out, loc, NULL);
+}
 
-/* Walks "A/B/C": returns the cluster of the folder holding the last part and its 8.3 name. */
-static int walk(const char *path, u32 *parent, char last83[11]) {
+/* Walks "A/B/C": returns the folder holding the last part, and the last part itself. */
+static int walk_name(const char *path, u32 *parent, const char **last, int *lastlen) {
     u32 dir = root_cluster;
     const char *p = path;
     while (*p == '/') p++;
     for (;;) {
         const char *end = p;
         while (*end && *end != '/') end++;
-        char n83[11];
-        if (to83(p, (int)(end - p), n83) != 0) return -1;
-        if (!*end) { *parent = dir; memcpy(last83, n83, 11); return 0; }
+        if (end == p) return -1;
+        if (!*end || (end[0] == '/' && !end[1])) { *parent = dir; *last = p; *lastlen = (int)(end - p); return 0; }
         dirent_t e;
-        if (dir_find(dir, n83, &e, NULL) != 0 || !(e.attr & ATTR_DIR)) return -1;
+        if (dir_find_name(dir, p, (int)(end - p), &e, NULL, NULL) != 0 || !(e.attr & ATTR_DIR)) return -1;
         dir = ent_cluster(&e);
         if (dir == 0) dir = root_cluster;
         p = end + 1;
     }
+}
+/* Same, for creating. A name that is not 8.3 gets a short alias (LONGNA~1.TXT)
+ * and its long name is kept in pending_long for dir_add to write as LFN entries. */
+static char pending_long[256];
+static int walk(const char *path, u32 *parent, char last83[11]) {
+    const char *last;
+    int len;
+    pending_long[0] = 0;
+    if (walk_name(path, parent, &last, &len) != 0) return -1;
+    dirent_t e;
+    if (dir_find_name(*parent, last, len, &e, NULL, NULL) == 0) { memcpy(last83, e.name, 11); return 0; }
+    if (to83(last, len, last83) == 0) return 0;
+    if (len > 255) return -1;
+    for (int i = 0; i < len; i++) if (last[i] == '/' || last[i] == '\\' || last[i] == ':' || last[i] == '*' || last[i] == '?') return -1;
+    int dot = -1;
+    for (int i = 0; i < len; i++) if (last[i] == '.') dot = i;
+    for (int n = 1; n <= 99999; n++) { /* NAME~1 ... NAME~9, then N~12345 like Windows */
+        char num[6];
+        int nd = 0;
+        for (int v = n; v; v /= 10) nd++;
+        for (int v = n, i = nd - 1; i >= 0; v /= 10, i--) num[i] = (char)('0' + v % 10);
+        memset(last83, ' ', 11);
+        int k = 0;
+        for (int i = 0; i < (dot < 0 ? len : dot) && k < 7 - nd; i++) {
+            char c = last[i];
+            if (c == ' ' || c == '.') continue;
+            if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+            if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) c = '_';
+            last83[k++] = c;
+        }
+        if (!k) last83[k++] = '_';
+        last83[k++] = '~';
+        for (int i = 0; i < nd; i++) last83[k++] = num[i];
+        for (int i = dot + 1, j = 8; dot >= 0 && i < len && j < 11; i++) {
+            char c = last[i];
+            if (c == ' ') continue;
+            if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+            last83[j++] = c;
+        }
+        if (dir_find(*parent, last83, NULL, NULL) != 0) {
+            memcpy(pending_long, last, (size_t)len);
+            pending_long[len] = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int fat_stat(const char *path, fat_entry_t *out) {
+    if (!fat_mounted) return -1;
+    if (!path[0] || (path[0] == '/' && !path[1])) { memset(out, 0, sizeof *out); out->is_dir = 1; return 0; }
+    u32 parent;
+    const char *last;
+    int len;
+    dirent_t e;
+    if (walk_name(path, &parent, &last, &len) != 0 || dir_find_name(parent, last, len, &e, NULL, out->lname) != 0) return -1;
+    from83(e.name, out->name);
+    out->size = e.size;
+    out->is_dir = (e.attr & ATTR_DIR) != 0;
+    out->wdate = e.wdate;
+    out->wtime = e.wtime;
+    return 0;
 }
 
 static int resolve_dir(const char *path, u32 *dir) {
@@ -232,15 +333,24 @@ int fat_list(const char *path, fat_entry_t *out, int max) {
     u32 dir;
     if (resolve_dir(path, &dir) != 0) return -1;
     int n = 0;
+    lfn_t l = {{0}, 0, 0};
     for (u32 c = dir; c >= 2 && c < EOC; c = fat_get(c)) {
         if (read_cluster(c) != 0) return -1;
         dirent_t *e = (dirent_t *)clbuf;
         for (u32 i = 0; i < clbytes / 32; i++) {
             if (e[i].name[0] == 0) return n;
-            if ((u8)e[i].name[0] == 0xE5 || e[i].attr == ATTR_LFN || (e[i].attr & ATTR_VOLUME) || e[i].name[0] == '.') continue;
+            if ((u8)e[i].name[0] == 0xE5) { l.ok = 0; continue; }
+            if (e[i].attr == ATTR_LFN) { lfn_add(&l, (const u8 *)&e[i]); continue; }
+            int longok = l.ok && l.sum == lfn_sum(e[i].name);
+            l.ok = 0;
+            if ((e[i].attr & ATTR_VOLUME) || e[i].name[0] == '.') continue;
             if (n < max) {
                 from83(e[i].name, out[n].name);
+                if (longok) strncpy0(out[n].lname, l.s, 256);
+                else strncpy0(out[n].lname, out[n].name, 256);
                 out[n].size = e[i].size;
+                out[n].wdate = e[i].wdate;
+                out[n].wtime = e[i].wtime;
                 out[n].is_dir = (e[i].attr & ATTR_DIR) != 0;
             }
             n++;
@@ -277,15 +387,38 @@ static void stamp(dirent_t *e) {
     e->wtime = e->ctime = (u16)((t.hour << 11) | (t.min << 5) | (t.sec / 2));
 }
 
-/* Writes an entry into a free slot of `dir`, growing the folder if it is full. */
+/* Writes an entry into free slots of `dir` (with its long name entries first
+ * when pending_long is set), growing the folder if it is full. */
 static int dir_add(u32 dir, const dirent_t *ne) {
+    int nl = pending_long[0] ? ((int)strlen(pending_long) + 12) / 13 : 0, need = nl + 1;
+    u8 ents[21][32];
+    for (int k = 0; k < nl; k++) { /* k = 0 is the last part, stored first */
+        int ord = nl - k;
+        u8 *x = ents[k];
+        memset(x, 0, 32);
+        x[0] = (u8)(ord | (k == 0 ? 0x40 : 0));
+        x[11] = ATTR_LFN;
+        x[13] = lfn_sum(ne->name);
+        static const u8 off[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+        int len = (int)strlen(pending_long);
+        for (int j = 0; j < 13; j++) {
+            int pos = (ord - 1) * 13 + j;
+            u16 ch = pos < len ? (u8)pending_long[pos] : pos == len ? 0 : 0xFFFF;
+            x[off[j]] = (u8)ch;
+            x[off[j] + 1] = (u8)(ch >> 8);
+        }
+    }
+    memcpy(ents[nl], ne, 32);
+    pending_long[0] = 0;
     u32 c = dir, last = dir;
     for (; c >= 2 && c < EOC; last = c, c = fat_get(c)) {
         if (read_cluster(c) != 0) return -1;
         dirent_t *e = (dirent_t *)clbuf;
+        int run = 0;
         for (u32 i = 0; i < clbytes / 32; i++) {
-            if (e[i].name[0] == 0 || (u8)e[i].name[0] == 0xE5) {
-                e[i] = *ne;
+            run = (e[i].name[0] == 0 || (u8)e[i].name[0] == 0xE5) ? run + 1 : 0;
+            if (run == need) {
+                for (int k = 0; k < need; k++) memcpy(&e[i + 1 - need + k], ents[k], 32);
                 return write_cluster(c);
             }
         }
@@ -293,7 +426,7 @@ static int dir_add(u32 dir, const dirent_t *ne) {
     u32 nc = alloc_cluster();
     if (!nc || fat_set(last, nc) != 0) return -1;
     memset(clbuf, 0, clbytes);
-    ((dirent_t *)clbuf)[0] = *ne;
+    for (int k = 0; k < need; k++) memcpy(&((dirent_t *)clbuf)[k], ents[k], 32);
     return write_cluster(nc);
 }
 
@@ -373,11 +506,17 @@ int fat_mkdir(const char *path) {
 int fat_delete(const char *path) {
     if (!fat_mounted) return -1;
     u32 parent;
-    char n83[11];
+    const char *last;
+    int len;
     dirent_t e;
     loc_t loc;
-    if (walk(path, &parent, n83) != 0 || dir_find(parent, n83, &e, &loc) != 0 || (e.attr & ATTR_DIR)) return -1;
+    if (walk_name(path, &parent, &last, &len) != 0 || dir_find_name(parent, last, len, &e, &loc, NULL) != 0 || (e.attr & ATTR_DIR)) return -1;
     free_chain(ent_cluster(&e));
     e.name[0] = (char)0xE5;
+    if (read_cluster(loc.cluster) == 0) { /* its long name entries go too */
+        dirent_t *d = (dirent_t *)clbuf;
+        for (int i = (int)loc.index - 1; i >= 0 && d[i].attr == ATTR_LFN && (u8)d[i].name[0] != 0xE5; i--) d[i].name[0] = (char)0xE5;
+        write_cluster(loc.cluster);
+    }
     return finish(update_entry(&loc, &e));
 }

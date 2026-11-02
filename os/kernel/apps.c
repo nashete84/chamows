@@ -90,7 +90,7 @@ int app_install(const char *id) {
 void apps_load_from_disk(void) {
     if (!fat_mounted) return;
     if (fat_mkdir("CHAMOWS") != 0 || fat_mkdir(APPS_DIR) != 0) { klog("apps: no se pudo crear %s en el pendrive\n", APPS_DIR); return; }
-    fat_entry_t list[32];
+    static fat_entry_t list[32];
     int n = fat_list(APPS_DIR, list, 32);
     for (int i = 0; i < n && i < 32; i++) {
         char id[13];
@@ -260,6 +260,8 @@ static const char *elf_load(const u8 *file, u32 size, u8 **mem_out, uptr *entry_
 }
 
 int app_run(installed_app_t *a) {
+    if (a->elf_size > 2 && a->elf[0] == 'M' && a->elf[1] == 'Z') /* a Windows .exe */
+        return pe_run(a->elf, a->elf_size, a->entry->name, &a->icon);
     struct app_instance *inst = kzalloc(sizeof *inst);
     if (!inst) return -1;
     uptr entry;

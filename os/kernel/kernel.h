@@ -14,7 +14,7 @@ typedef unsigned long size_t;
 typedef unsigned long uptr; /* pointer-sized integer */
 #define NULL ((void *)0)
 
-#define CHAMOWS_VERSION "0.4"
+#define CHAMOWS_VERSION "0.5"
 
 /* ---- ports ---- */
 static inline void outb(u16 p, u8 v) { __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(p)); }
@@ -59,6 +59,7 @@ u32 heap_total(void);
 /* ---- cpu.c ---- */
 #include "arch.h" /* regs_t and REG_IP() for this CPU */
 typedef void (*irq_handler_t)(regs_t *);
+extern irq_handler_t tick_hook, fault_hook;
 void cpu_init(void);
 void irq_install(int irq, irq_handler_t h);
 void pit_init(u32 hz);

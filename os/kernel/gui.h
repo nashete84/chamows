@@ -5,7 +5,7 @@
 #include "../sdk/chamows.h"
 
 #define TITLE_H 32
-#define TASKBAR_H 48
+#define TASKBAR_H 56
 
 /* Fonts (defined in gui.c from the generated assets). */
 extern const font_t *FONT_UI, *FONT_BOLD, *FONT_TITLE, *FONT_MONO;
@@ -28,7 +28,14 @@ struct cw_window {
     int timer_ms;
     u32 next_tick;
     int minimized;
+    int hidden;               /* not shown at all, not in the taskbar (Windows programs before ShowWindow) */
     int closing;
+    int hover;                /* also send CW_MOUSE_MOVE (button 0) without a button held */
+    int popup;                /* no frame, no taskbar button, stays above normal windows (menus, tooltips) */
+    int alpha;                /* client pixels carry alpha (layered windows): blended over what is behind */
+    int resizable;            /* has a maximize button (Windows programs with a sizing border) */
+    int maximized;
+    rect_t restore;           /* frame position and client size before maximizing */
     struct app_instance *app; /* NULL for built-in apps */
     struct cw_window *next;   /* z-order: list head is the bottom */
 };
@@ -44,6 +51,13 @@ cw_window *win_create(const char *title, int w, int h, cw_event_fn fn, void *use
 void win_close(cw_window *w);
 void win_invalidate(cw_window *w);
 void win_focus(cw_window *w);
+void win_show(cw_window *w, int show);         /* hide or show a window */
+int win_resize(cw_window *w, int cw, int ch);   /* new client size; 0 on success */
+void win_maximize(cw_window *w, int on);        /* fill the screen above the taskbar, or go back */
+void win_make_popup(cw_window *w);              /* turn into a frameless popup */
+void win_place(cw_window *w, int x, int y);     /* move so the client area starts at x,y on screen */
+cw_window *win_top(void);                       /* the focused window, or NULL */
+void mouse_pos(int *x, int *y);                 /* pointer position on screen */
 extern const cw_api *kernel_api;
 
 /* launcher: built-in ids ("store", "terminal", "pc") or installed app ids */
@@ -90,10 +104,19 @@ void apps_load_from_disk(void);                   /* reinstalls the apps saved o
 extern struct app_instance *current_app;
 int app_running(const char *id);
 
+/* ---- Windows programs (win32/win32.c) ---- */
+int pe_run(const u8 *data, u32 size, const char *name, const icon_t *icon);
+extern char pe_dir[160]; /* folder of the next .exe on the pendrive ("" = root); its current directory */
+extern int pe_cwd_root;     /* set by the terminal: the next .exe starts in the root folder */
+int pe_run_args(const u8 *data, u32 size, const char *name, const icon_t *icon, const char *args);
+void win32_poll(void);
+
 /* ---- built-in apps (builtin.c) ---- */
 void store_open(void);
 void terminal_open(void);
 void pc_open(void);
+void explorer_open(void);
+void explorer_refresh(void);
 extern const icon_t ICON_STORE, ICON_TERMINAL, ICON_PC, ICON_LOGO, ICON_APP, ICON_FOLDER;
 
 /* text helpers for built-ins */

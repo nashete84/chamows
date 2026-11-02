@@ -35,10 +35,14 @@ endif
 KFLAGS  := $(CFLAGS) -fno-pic -fno-pie -Ikernel -Ikernel/arch/$(ARCH) -I$(BUILD)
 AFLAGS  := $(CFLAGS) -fPIE -fvisibility=hidden -Isdk
 
-KSRC    := $(wildcard kernel/*.c) $(wildcard kernel/usb/*.c)
+KSRC    := $(wildcard kernel/*.c) $(wildcard kernel/usb/*.c) $(wildcard kernel/win32/*.c) $(wildcard kernel/net/*.c)
 KOBJ    := $(patsubst kernel/%.c,$(BUILD)/k/%.o,$(KSRC)) $(BUILD)/k/boot.o $(BUILD)/k/isr.o $(BUILD)/k/repo.o
-APPS    := calc notepad paint clock snake
+APPS    := calc notepad paint clock snake burbujas
 APPELF  := $(foreach a,$(APPS),$(BUILD)/apps/$(a).elf)
+# Windows programs (.exe) for the Store: only the 64-bit Chamows runs them
+WINCC   ?= x86_64-w64-mingw32-gcc
+WINAPPS := $(if $(filter x86_64,$(ARCH)),hola esquiva)
+WINEXE  := $(foreach a,$(WINAPPS),$(BUILD)/winapps/$(a).exe)
 
 all: $(BUILD)/chamows.bin
 
@@ -55,9 +59,17 @@ $(BUILD)/assets.h: build/assets.h
 	@mkdir -p $(BUILD)
 	cp $< $@
 
-$(BUILD)/k/%.o: kernel/%.c kernel/*.h kernel/usb/*.h kernel/arch/$(ARCH)/arch.h sdk/chamows.h $(BUILD)/assets.h
+$(BUILD)/k/%.o: kernel/%.c kernel/*.h kernel/usb/*.h kernel/net/*.h kernel/arch/$(ARCH)/arch.h sdk/chamows.h $(BUILD)/assets.h
 	@mkdir -p $(dir $@)
 	$(CC) $(KFLAGS) -c $< -o $@
+
+# the Win32 layer runs Windows code, which uses SSE
+$(BUILD)/k/win32/%.o: KFLAGS += -msse -msse2 -m80387 -mfpmath=sse
+$(BUILD)/k/win32/win32.o: kernel/win32/wfiles.inc kernel/win32/wgui.inc kernel/win32/wsock.inc kernel/win32/wdll.inc kernel/win32/wsync.inc kernel/win32/wseh.inc kernel/win32/wcrt.inc kernel/win32/wmisc.inc kernel/win32/wuser.inc kernel/win32/wfont.inc kernel/win32/wtext.inc kernel/win32/wicon.inc kernel/win32/stb_truetype.h kernel/win32/iconfont.h
+
+$(BUILD)/winapps/%.exe: winapps/%/main.c
+	@mkdir -p $(dir $@)
+	$(WINCC) -O2 -s $< -o $@ $$(grep -q WinMain $< && echo -mwindows) -lgdi32 -luser32
 
 $(BUILD)/k/%.o: kernel/arch/$(ARCH)/%.asm
 	@mkdir -p $(dir $@)
@@ -75,8 +87,9 @@ $(BUILD)/apps/%.elf: apps/%/main.c sdk/chamows.h sdk/cwlib.c
 	   $(BUILD)/apps/$*.o $(BUILD)/apps/$*-cwlib.o -o $@
 	strip $@
 
-$(BUILD)/repo.bin: tools/mkrepo.py $(APPELF) apps/*/manifest.ini build/assets.h
-	python3 tools/mkrepo.py $@ build/icons $(foreach a,$(APPS),apps/$(a):$(BUILD)/apps/$(a).elf)
+$(BUILD)/repo.bin: tools/mkrepo.py $(APPELF) $(WINEXE) apps/*/manifest.ini winapps/*/manifest.ini build/assets.h
+	python3 tools/mkrepo.py $@ build/icons $(foreach a,$(APPS),apps/$(a):$(BUILD)/apps/$(a).elf) \
+	    $(foreach a,$(WINAPPS),winapps/$(a):$(BUILD)/winapps/$(a).exe)
 
 $(BUILD)/chamows.elf: $(KOBJ) kernel/arch/$(ARCH)/linker.ld
 	ld -m $(LDEMU) -T kernel/arch/$(ARCH)/linker.ld -o $@ $(KOBJ)
