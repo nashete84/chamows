@@ -442,6 +442,15 @@ int tcp_send(int s, const void *data, u32 len) {
 }
 int tcp_eof(int s) { tcb_t *t = T(s); return !t || t->peer_fin; }
 u32 tcp_pending(int s) { tcb_t *t = T(s); return t ? t->rlen : 0; }
+/* copies waiting bytes without taking them (MSG_PEEK) */
+int tcp_peek(int s, void *buf, u32 max) {
+    tcb_t *t = T(s);
+    if (!t) return -1;
+    if (!t->rlen) return t->peer_fin || t->state == TCP_CLOSED ? -1 : 0;
+    u32 n = t->rlen < max ? t->rlen : max;
+    for (u32 i = 0; i < n; i++) ((u8 *)buf)[i] = t->rbuf[(t->rhead + i) % TBUF];
+    return (int)n;
+}
 int tcp_recv(int s, void *buf, u32 max) {
     tcb_t *t = T(s);
     if (!t) return -1;

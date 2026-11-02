@@ -44,6 +44,7 @@ enum { TCP_CLOSED, TCP_SYN_SENT, TCP_ESTABLISHED, TCP_FIN_WAIT, TCP_CLOSE_WAIT, 
 int tcp_connect(u32 ip, u16 port);           /* socket id (connecting), or -1 */
 int tcp_state(int s);
 int tcp_send(int s, const void *data, u32 len); /* bytes queued (may be fewer), -1 if closed */
+int tcp_peek(int s, void *buf, u32 max);     /* like tcp_recv, but the bytes stay */
 int tcp_recv(int s, void *buf, u32 max);     /* bytes, 0 if nothing yet, -1 when the peer closed and all was read */
 u32 tcp_pending(int s);                      /* bytes waiting to be read */
 int tcp_eof(int s);                          /* the peer closed (or the connection broke) */

@@ -390,11 +390,20 @@ static void post(w32proc_t *p, void *hwnd, u32 msg, u64 wp, i64 lp) {
     if (!tid) tid = p == cur && cur_th ? cur_th->id : main_tid(p);
     post_tid(p, tid, hwnd, msg, wp, lp);
 }
+/* GetMessage/PeekMessage filters: only this window, only messages first..last
+ * (0, 0 = all). Qt asks "is a socket message waiting?" this way. */
+static struct { int on; void *hwnd; u32 first, last; } mfilt;
+static int passes(void *hwnd, u32 msg) {
+    if (!mfilt.on) return 1;
+    if (mfilt.hwnd && mfilt.hwnd != (void *)-1 && hwnd != mfilt.hwnd) return 0;
+    if (mfilt.hwnd == (void *)-1 && hwnd) return 0; /* -1: thread messages only */
+    return (!mfilt.first && !mfilt.last) || (msg >= mfilt.first && msg <= mfilt.last);
+}
 /* the first message queued for thread tid; remove takes it out of the queue */
 static int queued(w32proc_t *p, u32 tid, MSG *m, int remove) {
     for (int i = 0; i < p->qcount; i++) {
         int k = (p->qhead + i) % QMAX;
-        if (p->qtid[k] != tid) continue;
+        if (p->qtid[k] != tid || !passes(p->q[k].hwnd, p->q[k].message)) continue;
         if (m) *m = p->q[k];
         if (remove) {
             for (int j = i; j > 0; j--) {
@@ -778,7 +787,7 @@ static WINAPI i64 u_SendMessageA(void *h, u32 msg, u64 wp, i64 lp) {
 }
 static int pending_paint(MSG *m) {
     for (w32win_t *w = cur->wins; w; w = w->next)
-        if (w->dirty && !w->destroyed && w->cw && win_tid(cur, w) == cur_th->id) { *m = (MSG){w, 0xF, 0, 0, ticks_ms, 0, 0, 0}; return 1; }
+        if (w->dirty && !w->destroyed && w->cw && win_tid(cur, w) == cur_th->id && passes(w, 0xF)) { *m = (MSG){w, 0xF, 0, 0, ticks_ms, 0, 0, 0}; return 1; }
     return 0;
 }
 static void timer_popped(MSG *m) {
@@ -790,7 +799,7 @@ static void timer_popped(MSG *m) {
  * else is waiting, and never piling up in the queue. */
 static int due_timer(w32proc_t *p, u32 tid, MSG *m, int remove) {
     for (w32win_t *w = p->wins; w; w = w->next) {
-        if (w->destroyed || win_tid(p, w) != tid) continue;
+        if (w->destroyed || win_tid(p, w) != tid || !passes(w, 0x113)) continue;
         for (int i = 0; i < 48; i++) {
             wtimer_t *t = &w->timers[i];
             if (!t->used || (i32)(ticks_ms - t->next) < 0) continue;
@@ -808,20 +817,29 @@ static int next_msg(MSG *m, int remove) {
         return 1;
     }
     if (pending_paint(m)) return 1;
-    if (cur_th->quit) {
+    if (cur_th->quit && (!mfilt.on || (!mfilt.first && !mfilt.last) || (mfilt.first <= 0x12 && 0x12 <= mfilt.last))) {
         *m = (MSG){NULL, 0x12, (u64)cur_th->quit_code, 0, ticks_ms, 0, 0, 0};
         if (remove) cur_th->quit = 0;
         return 1;
     }
     return due_timer(cur, cur_th->id, m, remove);
 }
+static int next_msg_f(MSG *m, int remove, void *h, u32 a, u32 b) {
+    __typeof__(mfilt) saved = mfilt; /* a window procedure run inside may peek too */
+    run_sent();
+    mfilt.on = h || a || b;
+    mfilt.hwnd = h; mfilt.first = a; mfilt.last = b;
+    int r = next_msg(m, remove);
+    mfilt = saved;
+    return r;
+}
 static WINAPI int u_GetMessageA(MSG *m, void *h, u32 a, u32 b) {
     flush_windows(cur);
-    while (!next_msg(m, 1)) yield(W_MSG);
+    while (!next_msg_f(m, 1, h, a, b)) yield(W_MSG);
     return m->message != 0x12;
 }
 static WINAPI int u_PeekMessageA(MSG *m, void *h, u32 a, u32 b, u32 rm) {
-    if (next_msg(m, rm & 1)) return 1;
+    if (next_msg_f(m, rm & 1, h, a, b)) return 1;
     flush_windows(cur);
     yield(W_RUN); /* let the desktop run between frames of a busy loop */
     return 0;

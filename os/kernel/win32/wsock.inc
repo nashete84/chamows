@@ -29,7 +29,8 @@ typedef struct {
 static wsock_t socks[NSOCK];
 static int wsa_err;
 
-static wsock_t *S(u64 s) { u64 i = s - SOCK_BASE; return i < NSOCK && socks[i].used ? &socks[i] : NULL; }
+/* a socket of the running program (another program's numbers are not valid here) */
+static wsock_t *S(u64 s) { u64 i = s - SOCK_BASE; return i < NSOCK && socks[i].used && socks[i].owner == cur ? &socks[i] : NULL; }
 static int sock_fail(int e) { wsa_err = e; last_error = (u32)e; return -1; }
 
 static WINAPI int ws_WSAStartup(u16 ver, u8 *data) {
@@ -140,6 +141,7 @@ static WINAPI int ws_send(u64 s, const char *buf, int len, int fl) {
 static WINAPI int ws_recv(u64 s, char *buf, int len, int fl) {
     wsock_t *k = S(s);
     if (!k) return sock_fail(WSAENOTSOCK);
+    if (len < 0 || (len && !buf)) return sock_fail(10014); /* WSAEFAULT: a negative length would copy past the buffer */
     if (k->type == 2) {
         if (udp_ready(k) != 0) return sock_fail(10055);
         int n;
@@ -153,7 +155,7 @@ static WINAPI int ws_recv(u64 s, char *buf, int len, int fl) {
     if (k->tcp < 0) return sock_fail(WSAENOTCONN);
     k->sent_events &= ~1u; /* like Windows: a recv call re-arms FD_READ */
     for (;;) {
-        int n = tcp_recv(k->tcp, buf, (u32)len);
+        int n = fl & 2 ? tcp_peek(k->tcp, buf, (u32)len) : tcp_recv(k->tcp, buf, (u32)len); /* 2: MSG_PEEK */
         if (n > 0) return n;
         if (n < 0) return tcp_state(k->tcp) == TCP_CLOSED && !k->was_connected ? sock_fail(WSAECONNRESET) : 0; /* 0: the peer closed */
         if (k->nonblock) return sock_fail(WSAEWOULDBLOCK);
@@ -207,7 +209,7 @@ static WINAPI int ws_WSASend(u64 s, wsabuf_t *b, u32 n, u32 *sent, u32 fl, void 
     return 0;
 }
 static WINAPI int ws_WSARecv(u64 s, wsabuf_t *b, u32 n, u32 *got, u32 *fl, void *ov, void *cb) {
-    int r = n ? ws_recv(s, b[0].buf, (int)b[0].len, 0) : 0;
+    int r = n ? ws_recv(s, b[0].buf, (int)b[0].len, fl ? (int)*fl : 0) : 0;
     if (r < 0) return -1;
     if (got) *got = (u32)r;
     if (fl) *fl = 0;
@@ -230,6 +232,13 @@ static WINAPI int ws_ioctlsocket(u64 s, u32 cmd, u32 *arg) {
 }
 static WINAPI int ws_WSAIoctl(u64 s, u32 code, void *in, u32 inl, void *out, u32 outl, u32 *ret, void *ov, void *cb) {
     if (ret) *ret = 0;
+    if (code == 0x8004667E || code == 0x4004667F) { /* FIONBIO, FIONREAD: as with ioctlsocket (Qt asks this way) */
+        u32 v = in && inl >= 4 ? *(u32 *)in : 0;
+        int r = ws_ioctlsocket(s, code, &v);
+        if (code == 0x4004667F && out && outl >= 4) { *(u32 *)out = v; if (ret) *ret = 4; }
+        return r;
+    }
+    if (code == 0x98000004) return S(s) ? 0 : sock_fail(WSAENOTSOCK); /* SIO_KEEPALIVE_VALS: accepted */
     return sock_fail(10045); /* no extension functions (ConnectEx...) */
 }
 static WINAPI int ws_setsockopt(u64 s, int lvl, int opt, const char *v, int len) { return S(s) ? 0 : sock_fail(WSAENOTSOCK); }
